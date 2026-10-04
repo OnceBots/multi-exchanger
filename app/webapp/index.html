@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>MultiBot Rooms</title>
+<link rel="stylesheet" href="/app/static/style.css">
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+</head>
+<body>
+<main class="shell">
+  <header><h1>🎬 Salas</h1><p id="status">Conectando…</p></header>
+  <section id="rooms" class="grid"></section>
+  <section class="card">
+    <h2>➕ Crear sala</h2>
+    <input id="name" placeholder="Nombre">
+    <input id="description" placeholder="Descripción">
+    <select id="visibility"><option value="PUBLIC">Pública</option><option value="PRIVATE">Privada</option></select>
+    <input id="max" type="number" value="100" min="0">
+    <button onclick="createRoom()">Crear</button>
+  </section>
+</main>
+<script src="/app/static/app.js"></script>
+</body>
+</html>

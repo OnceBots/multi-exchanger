@@ -1,0 +1,31 @@
+services:
+  mongo:
+    image: mongo:8
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+
+  app:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      MONGO_URI: mongodb://mongo:27017
+      REDIS_URI: redis://redis:6379/0
+      DB_NAME: telegram_multibot
+    depends_on:
+      - mongo
+      - redis
+    ports:
+      - "10000:10000"
+
+volumes:
+  mongo_data:

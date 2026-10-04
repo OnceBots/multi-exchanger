@@ -1,0 +1,34 @@
+services:
+  - type: web
+    name: telegram-multibot-platform
+    env: docker
+    plan: starter
+    autoDeploy: true
+    healthCheckPath: /health
+    envVars:
+      - key: MASTER_BOT_TOKEN
+        sync: false
+      - key: MONGO_URI
+        sync: false
+      - key: DB_NAME
+        value: telegram_multibot
+      - key: WEBHOOK_BASE_URL
+        sync: false
+      - key: MASTER_WEBHOOK_PATH
+        value: /telegram/webhook/master
+      - key: WEBHOOK_SECRET
+        sync: false
+      - key: APP_BASE_URL
+        sync: false
+      - key: PORT
+        value: 10000
+      - key: ENVIRONMENT
+        value: production
+      - key: MODE
+        value: webhook
+      - key: ADMIN_IDS
+        sync: false
+      - key: BOT_TOKEN_ENCRYPTION_KEY
+        sync: false
+      - key: LOG_LEVEL
+        value: INFO
