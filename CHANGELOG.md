@@ -1,5 +1,15 @@
 # Changelog
 
+## v6 — 2026-10-04
+
+- Refined Master and Child Bot HTML presentation with clearer hierarchy and richer copy.
+- Removed admin-feed wording from creator-facing navigation and direct-media error messages.
+- Kept administrator-only moderation controls private to `ADMIN_IDS`.
+- Added an explicit privacy/moderation disclosure in the Child Bot and Master help so administrative review is not concealed from users.
+- Reworked the admin moderation panel with an explicit reception toggle.
+- Improved direct-publication messaging so it reads as a normal product flow.
+
+
 ## v2 — Public Master + Admin Feed + Premium Room UI
 
 - Master Bot is publicly usable for Child Bot creation.
@@ -17,15 +27,3 @@
 - Mini App redesigned with Telegram-aware theme variables, mobile-first layout, bottom navigation, skeletons, modals, toasts and room cards.
 - Mini App supports explore, my rooms, creation, details, join/leave, edit, permissions, moderation, profile and language preference.
 - Documentation updated for the new public Master and Admin Feed behaviour.
-
-
-## v2.1 webhook recovery hotfix
-- Force Telegram `message` and `callback_query` updates for Master and Child webhooks.
-- Verify `allowed_updates` and Telegram `last_error_message` during startup.
-- Re-register webhook automatically when URL or allowed updates mismatch.
-- Add explicit webhook receipt logging for update diagnostics.
-
-## v4.1 webhook delivery hardening
-- Reconcile Master webhook after HTTP startup.
-- Detect pending-update delivery stalls and re-register webhook without dropping updates.
-- Track last Master webhook receipt for diagnostics.

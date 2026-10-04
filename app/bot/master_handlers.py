@@ -10,16 +10,6 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 def build_master_router(manager) -> Router:
     router = Router(name="master")
 
-    def _is_text_command(message: Message, command: str) -> bool:
-        text = (message.text or "").strip()
-        first = text.split(maxsplit=1)[0] if text else ""
-        if not first.startswith("/"):
-            return False
-        command_part = first[1:]
-        if "@" in command_part:
-            command_part = command_part.split("@", 1)[0]
-        return command_part.lower() == command.lower()
-
     def is_admin(message: Message) -> bool:
         return bool(message.from_user and int(message.from_user.id) in manager.settings.admin_ids)
 
@@ -39,44 +29,49 @@ def build_master_router(manager) -> Router:
     async def begin_create(message: Message) -> None:
         await manager.repositories.session.set(0, int(message.from_user.id), "master_token", {})
         await message.answer(
-            "<b>➕ Crear bot hijo</b>\n\n"
-            "Pega ahora el <b>token de BotFather</b> del bot que quieres convertir en hijo.\n\n"
+            "<b>➕ CREAR BOT HIJO</b>\n"
+            "<i>Configuración rápida y segura</i>\n\n"
+            "<b>1.</b> Abre <code>@BotFather</code> y crea tu bot.\n"
+            "<b>2.</b> Copia su <b>token</b>.\n"
+            "<b>3.</b> Pégalo aquí para validarlo.\n\n"
             "🔐 El token se valida y se almacena cifrado.\n"
-            "⚡ Si todo es correcto, el bot quedará activo automáticamente.\n\n"
-            "<i>Tu mensaje con el token se borrará al procesarlo.</i>"
+            "⚡ Tras una validación correcta, el bot se activa automáticamente.\n\n"
+            "<i>Por seguridad, elimina el mensaje del token después de enviarlo.</i>"
         )
 
     async def show_start(message: Message) -> None:
         uid = int(message.from_user.id)
         if uid in manager.settings.admin_ids:
             text = (
-                "<b>👑 BOT MASTER · CONTROL CENTER</b>\n\n"
-                "Plataforma central para crear y supervisar bots hijos.\n\n"
-                "🟢 Los usuarios pueden crear bots libremente.\n"
-                "🛰 Los administradores reciben cada alta nueva.\n"
-                "📥 Al entrar como admin a un bot hijo se activa su feed directo."
+                "<b>👑 BOT MASTER</b>\n"
+                "<i>Centro de control de la plataforma</i>\n\n"
+                "🟢 <b>Creación pública:</b> cualquier usuario puede registrar un bot hijo.\n"
+                "🧩 <b>Gestión central:</b> estado, salud, reinicios y configuración.\n"
+                "🛡️ <b>Administración:</b> control y supervisión de todos los tenants.\n\n"
+                "<b>Selecciona una sección para comenzar.</b>"
             )
             await message.answer(text, reply_markup=admin_kb())
         else:
             text = (
-                "<b>🤖 MULTIBOT HUB</b>\n\n"
-                "Crea tu propio bot hijo en pocos segundos.\n\n"
-                "1️⃣ Crea un bot con <b>@BotFather</b>.\n"
-                "2️⃣ Pulsa <b>Crear mi bot</b>.\n"
-                "3️⃣ Pega el token.\n"
-                "4️⃣ El sistema valida y activa tu bot.\n\n"
-                "Tu bot tendrá salas, multimedia, Mini App y herramientas de administración."
+                "<b>🚀 MULTIBOT HUB</b>\n"
+                "<i>Crea tu propio bot hijo en pocos minutos</i>\n\n"
+                "<b>¿Cómo funciona?</b>\n"
+                "1️⃣ Crea un bot con <code>@BotFather</code>.\n"
+                "2️⃣ Pulsa <b>➕ Crear mi bot</b>.\n"
+                "3️⃣ Pega el token y espera la validación.\n"
+                "4️⃣ Tu bot quedará listo para usar.\n\n"
+                "<b>✨ Incluye</b>\n"
+                "🏠 Salas públicas y privadas\n"
+                "📸 Fotos · 🎬 Vídeos · 📎 Archivos · 🖼️ Álbumes\n"
+                "🕶️ Publicación anónima en salas\n"
+                "📱 Mini App móvil\n\n"
+                "<b>🔐 Seguridad</b>\n"
+                "Los tokens se validan y se almacenan cifrados. No los compartas con otras personas."
             )
             await message.answer(text, reply_markup=master_public_kb())
 
     @router.message(CommandStart())
     async def start(message: Message) -> None:
-        await show_start(message)
-
-    # Fallback robusto para instalaciones/webhook que entreguen el texto
-    # del comando sin entidades de Telegram.
-    @router.message(lambda message: _is_text_command(message, "start"))
-    async def start_text_fallback(message: Message) -> None:
         await show_start(message)
 
     @router.message(Command("add_bot"))
@@ -184,9 +179,9 @@ def build_master_router(manager) -> Router:
     async def home_callback(callback: CallbackQuery) -> None:
         await callback.answer()
         if int(callback.from_user.id) in manager.settings.admin_ids:
-            await callback.message.edit_text("<b>👑 BOT MASTER · CONTROL CENTER</b>\n\nSelecciona una sección.", reply_markup=admin_kb())
+            await callback.message.edit_text("<b>👑 BOT MASTER</b>\n<i>Centro de control</i>\n\nSelecciona una sección.", reply_markup=admin_kb())
         else:
-            await callback.message.edit_text("<b>🤖 MULTIBOT HUB</b>\n\n¿Qué quieres hacer?", reply_markup=master_public_kb())
+            await callback.message.edit_text("<b>🚀 MULTIBOT HUB</b>\n<i>Selecciona una opción</i>", reply_markup=master_public_kb())
 
     @router.callback_query(F.data == "master:mine")
     async def mine_callback(callback: CallbackQuery) -> None:
@@ -273,11 +268,18 @@ def build_master_router(manager) -> Router:
     async def how_callback(callback: CallbackQuery) -> None:
         await callback.answer()
         await callback.message.edit_text(
-            "<b>📖 Cómo funciona</b>\n\n"
-            "<b>Creadores:</b> cualquiera puede registrar un bot hijo con un token válido de BotFather.\n\n"
-            "<b>Administradores:</b> reciben cada alta nueva y pueden supervisar todos los runtimes.\n\n"
-            "<b>Feed admin:</b> cuando un ADMIN_ID entra por primera vez a un bot hijo, se activa automáticamente su feed y recibe el contenido directo que llegue al bot, sin necesidad de entrar a una sala.\n\n"
-            "<b>Salas:</b> siguen disponibles para comunidades públicas y privadas, moderación y difusión anónima.",
+            "<b>📖 CÓMO FUNCIONA</b>\n"
+            "<i>Una plataforma para crear y administrar bots Telegram sin duplicar infraestructura</i>\n\n"
+            "<b>👤 Creadores</b>\n"
+            "Cualquier usuario puede registrar un bot hijo con un token válido de <code>@BotFather</code>.\n\n"
+            "<b>👑 Administradores</b>\n"
+            "Supervisan el estado, salud y actividad de los bots registrados.\n\n"
+            "<b>🏠 Salas</b>\n"
+            "Comunidades públicas y privadas con permisos, moderación y difusión anónima.\n\n"
+            "<b>🔐 Privacidad</b>\n"
+            "El contenido de un bot puede ser revisado por la administración para moderación, seguridad y cumplimiento.\n\n"
+            "<b>📱 Mini App</b>\n"
+            "La gestión de salas y perfiles también está disponible desde una interfaz móvil.",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="↩️ Inicio", callback_data="master:home")]]),
         )
 
@@ -312,7 +314,7 @@ def build_master_router(manager) -> Router:
     @router.message(Command("stats"))
     async def stats_cmd(message: Message) -> None:
         if not is_admin(message):
-            await message.answer("Usa el panel de administración para ver estadísticas.")
+            await message.answer("<b>📊 Estadísticas</b>\n\nEsta sección está disponible únicamente para administradores.")
             return
         docs = await manager.repositories.bots.list_all()
         running = sum(1 for d in docs if d.get("status") == "RUNNING")

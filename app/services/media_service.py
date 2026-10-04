@@ -88,7 +88,7 @@ class MediaService:
             if feed_enabled:
                 await self.admin_feed.enqueue_message(message)
             if not room_id and not feed_enabled:
-                await message.answer("🏠 Primero crea o únete a una sala.\n\nSi eres administrador, entra una vez al bot para activar el feed administrativo.")
+                await message.answer("<b>🏠 ELIGE UNA SALA</b>\n\nCrea o únete a una sala para compartir tu contenido con la comunidad.")
                 return "no_destination"
             return "queued"
 
@@ -98,7 +98,7 @@ class MediaService:
                 await self.admin_feed.enqueue_message(message)
                 if not room_id:
                     return "admin_feed_only"
-            await message.answer("📦 En las salas se publican fotos, vídeos, archivos y álbumes.\n\nUsa el menú para gestionar tu sala.")
+            await message.answer("<b>📦 PUBLICACIONES</b>\n\nEn las salas se publican fotos, vídeos, archivos y álbumes.\nUsa el menú para crear o gestionar una sala.")
             return "text"
         return "ignored"
 

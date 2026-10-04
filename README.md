@@ -1,3 +1,7 @@
+## Privacy and moderation
+
+Child bots should disclose to users that content may be reviewed by platform administrators for moderation, security, and compliance. The platform must not present administrative review as a secret feature. The admin reception channel is intended as a moderation/safety control and can be enabled or disabled by authorized administrators.
+
 # Telegram Multi-Bot Platform — Master + Child Bots + Rooms + Admin Feed
 
 Plataforma modular para ejecutar un **BOT MASTER** y una cantidad creciente de **BOTS HIJOS** usando un único core, tenants aislados por `bot_id`, Webhooks, MongoDB Async, Mini App y workers de multimedia.

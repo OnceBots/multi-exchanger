@@ -27,7 +27,7 @@ def menu_kb(ctx, user_id: int | None = None) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="📖 Manual", callback_data="help")],
     ]
     if is_admin:
-        rows.insert(0, [InlineKeyboardButton(text="🛰 Feed admin: ACTIVO", callback_data="adminfeed:toggle")])
+        rows.insert(0, [InlineKeyboardButton(text="🛡️ Herramientas de moderación", callback_data="admin:panel")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -90,16 +90,6 @@ def _room_management_kb(room: dict, can_global: bool = False) -> InlineKeyboardM
 def build_router(ctx) -> Router:
     router = Router(name=f"child-{ctx.bot_id}")
 
-    def _is_text_command(message: Message, command: str) -> bool:
-        text = (message.text or "").strip()
-        first = text.split(maxsplit=1)[0] if text else ""
-        if not first.startswith("/"):
-            return False
-        command_part = first[1:]
-        if "@" in command_part:
-            command_part = command_part.split("@", 1)[0]
-        return command_part.lower() == command.lower()
-
     async def upsert_user(message: Message) -> None:
         if message.from_user:
             await ctx.repositories.user.upsert(
@@ -115,27 +105,23 @@ def build_router(ctx) -> Router:
         feed_count = await ctx.repositories.admin_feed.count(ctx.bot_id) if admin else 0
         status = "🛰 Feed administrativo activo" if admin and feed_count else ""
         text = (
-            f"<b>🎬 {html.escape('@' + (ctx.bot.username or 'MULTIMEDIA HUB'))}</b>\n\n"
-            "Comparte fotos, vídeos y archivos con una experiencia rápida y anónima.\n\n"
-            "<b>¿Qué quieres hacer?</b>\n"
+            f"<b>🎬 {html.escape('@' + (ctx.bot.username or 'MULTIMEDIA HUB'))}</b>\n"
+            "<i>Tu espacio para compartir y descubrir contenido</i>\n\n"
+            "<b>✨ Accesos rápidos</b>\n"
             "🌎 Explorar comunidades\n"
             "🏠 Gestionar tus salas\n"
-            "📦 Publicar multimedia\n"
-            "📱 Usar la Mini App\n"
+            "📦 Publicar fotos, vídeos y archivos\n"
+            "📱 Abrir la Mini App\n\n"
+            "<b>🕶️ Privacidad</b>\n"
+            "El contenido compartido puede ser revisado por la administración del servicio para moderación, seguridad y cumplimiento. "
+            "En las salas, la identidad del emisor no se muestra a los demás miembros por defecto.\n"
         )
         if status:
-            text += f"\n{status}"
+            text += f"\n<b>🛡️ Modo administración:</b> {status}"
         await target.answer(text, reply_markup=menu_kb(ctx, user_id))
 
     @router.message(CommandStart())
     async def start(message: Message) -> None:
-        await _handle_start(message)
-
-    @router.message(lambda message: _is_text_command(message, "start"))
-    async def start_text_fallback(message: Message) -> None:
-        await _handle_start(message)
-
-    async def _handle_start(message: Message) -> None:
         await upsert_user(message)
         uid = int(message.from_user.id) if message.from_user else 0
         if uid in ctx.settings.admin_ids:
@@ -153,14 +139,17 @@ def build_router(ctx) -> Router:
     @router.message(Command("help"))
     async def help_cmd(message: Message) -> None:
         await message.answer(
-            "<b>📖 Manual</b>\n\n"
-            "1. <b>Crear sala:</b> define nombre, visibilidad, capacidad y permisos.\n"
-            "2. <b>Unirte:</b> usa una sala pública o un código/enlace privado.\n"
-            "3. <b>Publicar:</b> envía fotos, vídeos, archivos o álbumes.\n"
-            "4. <b>Álbumes:</b> se mantienen agrupados cuando Telegram lo permite.\n"
-            "5. <b>Anonimato:</b> por defecto los miembros no ven la identidad del emisor.\n"
-            "6. <b>Administración:</b> owner/admin pueden moderar y configurar salas.\n"
-            "7. <b>Mini App:</b> acceso completo desde un panel móvil."
+            "<b>📖 MANUAL</b>\n"
+            "<i>Todo lo que necesitas para empezar</i>\n\n"
+            "<b>1. 🏠 Salas</b> — crea una comunidad pública o privada.\n"
+            "<b>2. 🚪 Unirme</b> — usa una sala pública, código o enlace.\n"
+            "<b>3. 📦 Multimedia</b> — envía fotos, vídeos, archivos o álbumes.\n"
+            "<b>4. 🖼️ Álbumes</b> — se mantienen agrupados cuando Telegram lo permite.\n"
+            "<b>5. 🕶️ Anonimato</b> — la identidad no se muestra a los miembros por defecto.\n"
+            "<b>6. 🛡️ Moderación</b> — owners y admins pueden administrar sus salas.\n"
+            "<b>7. 📱 Mini App</b> — gestiona todo desde una interfaz móvil.\n\n"
+            "<b>🔐 Privacidad y seguridad</b>\n"
+            "El contenido enviado puede ser revisado por la administración para seguridad y moderación."
         )
 
     @router.message(Command("rooms"))
@@ -261,6 +250,28 @@ def build_router(ctx) -> Router:
         await callback.answer()
         await help_cmd(callback.message)
 
+    @router.callback_query(F.data == "admin:panel")
+    async def admin_panel(callback: CallbackQuery) -> None:
+        uid = int(callback.from_user.id)
+        if uid not in ctx.settings.admin_ids:
+            await callback.answer("No autorizado", show_alert=True)
+            return
+        enabled = await ctx.repositories.admin_feed.is_enabled(ctx.bot_id, uid)
+        status = "🟢 ACTIVO" if enabled else "⚪ INACTIVO"
+        text = (
+            "<b>🛡️ HERRAMIENTAS DE MODERACIÓN</b>\n"
+            "<i>Acceso exclusivo para administradores</i>\n\n"
+            f"📥 Recepción directa: <b>{status}</b>\n"
+            "📊 Puedes consultar la actividad y la salud del bot desde el panel.\n\n"
+            "El contenido se recibe para tareas de moderación y seguridad del servicio."
+        )
+        rows = [
+            [InlineKeyboardButton(text=("🔕 Desactivar recepción" if enabled else "🔔 Activar recepción"), callback_data="adminfeed:toggle")],
+            [InlineKeyboardButton(text="↩️ Volver al inicio", callback_data="home")],
+        ]
+        await callback.answer()
+        await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+
     @router.callback_query(F.data == "adminfeed:toggle")
     async def adminfeed_toggle(callback: CallbackQuery) -> None:
         uid = int(callback.from_user.id)
@@ -270,11 +281,25 @@ def build_router(ctx) -> Router:
         enabled = await ctx.repositories.admin_feed.is_enabled(ctx.bot_id, uid)
         if enabled:
             await ctx.repositories.admin_feed.disable(ctx.bot_id, uid)
-            await callback.answer("Feed desactivado")
+            notice = "Recepción desactivada"
         else:
             await ctx.repositories.admin_feed.enable(ctx.bot_id, uid)
-            await callback.answer("Feed activado")
-        await callback.message.edit_reply_markup(reply_markup=menu_kb(ctx, uid))
+            notice = "Recepción activada"
+        enabled = not enabled
+        status = "🟢 ACTIVO" if enabled else "⚪ INACTIVO"
+        text = (
+            "<b>🛡️ HERRAMIENTAS DE MODERACIÓN</b>\n"
+            "<i>Acceso exclusivo para administradores</i>\n\n"
+            f"📥 Recepción directa: <b>{status}</b>\n"
+            "📊 Puedes consultar la actividad y la salud del bot desde el panel.\n\n"
+            "El contenido se recibe para tareas de moderación y seguridad del servicio."
+        )
+        rows = [
+            [InlineKeyboardButton(text=("🔕 Desactivar recepción" if enabled else "🔔 Activar recepción"), callback_data="adminfeed:toggle")],
+            [InlineKeyboardButton(text="↩️ Volver al inicio", callback_data="home")],
+        ]
+        await callback.answer(notice)
+        await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
     @router.callback_query(F.data.startswith("room:view:"))
     async def room_view(callback: CallbackQuery, do_answer: bool = True) -> None:

@@ -31,10 +31,6 @@ class Platform:
         self.manager = BotManager(self.settings, self.mongo, SecretBox(self.settings.token_encryption_key))
         await self.manager.start_master()
         await self.manager.bootstrap_children()
-        if self.settings.mode == "webhook":
-            # The first webhook registration occurs during startup; the monitor
-            # re-registers it after the HTTP server has had time to become reachable.
-            self.logger.info("webhook_post_start_reconciliation_scheduled")
         self.logger.info("platform_ready")
 
     async def shutdown(self) -> None:
