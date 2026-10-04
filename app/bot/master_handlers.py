@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import html
 
 from aiogram import F, Router
@@ -287,29 +289,67 @@ def build_master_router(manager) -> Router:
     async def master_session(message: Message) -> None:
         if not message.text or message.text.startswith("/") or not message.from_user:
             return
-        session = await manager.repositories.session.get(0, int(message.from_user.id))
+        user_id = int(message.from_user.id)
+        session = await manager.repositories.session.get(0, user_id)
         if not session or session.get("step") != "master_token":
             return
+
         token = message.text.strip()
-        await manager.repositories.session.clear(0, int(message.from_user.id))
+        await manager.repositories.session.clear(0, user_id)
+
+        # Dar respuesta inmediata para que el usuario no quede esperando
+        # mientras Telegram valida el token y se configura el child bot.
+        status_message = await message.answer(
+            "<b>⏳ VALIDANDO BOT</b>\n\n"
+            "Estoy comprobando el token con Telegram y preparando tu bot hijo.\n\n"
+            "<i>Este proceso puede tardar unos segundos.</i>"
+        )
+
+        # El token ya no debe quedar expuesto en el chat.
         try:
-            info = await manager.register_bot(token, int(message.from_user.id))
-            await message.answer(
-                "<b>✅ Bot hijo creado</b>\n\n"
-                f"🤖 @{html.escape(info.username or str(info.bot_id))}\n"
-                f"🆔 <code>{info.bot_id}</code>\n\n"
-                "⚡ Ya está activo.\n"
-                "📱 Su Mini App está disponible.\n"
-                "👤 Eres su owner.",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🤖 Abrir bot", url=f"https://t.me/{info.username}")]]) if info.username else admin_kb(),
+            await message.delete()
+        except Exception:
+            pass
+
+        try:
+            info = await asyncio.wait_for(
+                manager.register_bot(token, user_id),
+                timeout=60.0,
+            )
+            await status_message.edit_text(
+                "<b>✅ BOT HIJO CREADO</b>\n\n"
+                f"🤖 <b>@{html.escape(info.username or str(info.bot_id))}</b>\n"
+                f"🆔 <code>{info.bot_id}</code>\n"
+                "🟢 <b>Estado:</b> Activo\n\n"
+                "Tu bot ya está listo para utilizarse.\n"
+                "Puedes abrirlo desde el botón inferior.",
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        ([InlineKeyboardButton(text="🤖 Abrir mi bot", url=f"https://t.me/{info.username}")] if info.username else []),
+                        [InlineKeyboardButton(text="➕ Crear otro bot", callback_data="master:create")],
+                        [InlineKeyboardButton(text="↩️ Volver al inicio", callback_data="master:home")],
+                    ]
+                ),
+            )
+        except asyncio.TimeoutError:
+            await status_message.edit_text(
+                "<b>⏱️ VALIDACIÓN EN CURSO</b>\n\n"
+                "Telegram está tardando más de lo habitual en responder.\n\n"
+                "He detenido la espera del chat para que no quede bloqueado. "
+                "Comprueba <b>Mis bots</b> en unos instantes antes de volver a intentarlo."
             )
         except Exception as exc:
-            await message.answer(f"❌ No se pudo crear el bot.\n\n<code>{html.escape(str(exc)[:400])}</code>")
-        finally:
-            try:
-                await message.delete()
-            except Exception:
-                pass
+            await status_message.edit_text(
+                "<b>❌ NO SE PUDO CREAR EL BOT</b>\n\n"
+                f"<code>{html.escape(str(exc)[:500])}</code>\n\n"
+                "Verifica que el token sea correcto y vuelve a intentarlo.",
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [InlineKeyboardButton(text="🔁 Intentar de nuevo", callback_data="master:create")],
+                        [InlineKeyboardButton(text="↩️ Inicio", callback_data="master:home")],
+                    ]
+                ),
+            )
 
     @router.message(Command("stats"))
     async def stats_cmd(message: Message) -> None:

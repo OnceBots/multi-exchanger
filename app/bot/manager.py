@@ -324,13 +324,12 @@ class BotManager:
     async def notify_admins_new_bot(self, info: BotInfo, creator_id: int) -> None:
         name = f"@{info.username}" if info.username else str(info.bot_id)
         text = (
-            "<b>🚀 NUEVO BOT HIJO</b>\n\n"
+            "<b>🚀 NUEVO BOT REGISTRADO</b>\n\n"
             f"🤖 <b>{name}</b>\n"
             f"🆔 <code>{info.bot_id}</code>\n"
             f"👤 Creador: <code>{creator_id}</code>\n"
             "🟢 Estado: <b>RUNNING</b>\n\n"
-            "Este bot ya está disponible. Al entrar como administrador al bot hijo, "
-            "el <b>feed administrativo</b> se activa automáticamente."
+            "El bot hijo fue validado, configurado y activado correctamente."
         )
         from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
         rows = []
