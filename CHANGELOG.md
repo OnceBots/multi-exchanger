@@ -24,3 +24,8 @@
 - Verify `allowed_updates` and Telegram `last_error_message` during startup.
 - Re-register webhook automatically when URL or allowed updates mismatch.
 - Add explicit webhook receipt logging for update diagnostics.
+
+## v4.1 webhook delivery hardening
+- Reconcile Master webhook after HTTP startup.
+- Detect pending-update delivery stalls and re-register webhook without dropping updates.
+- Track last Master webhook receipt for diagnostics.

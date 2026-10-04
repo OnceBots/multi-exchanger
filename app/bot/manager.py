@@ -59,6 +59,8 @@ class BotManager:
         self.lock = asyncio.Lock()
         self.supervisor_task: asyncio.Task[object] | None = None
         self.room_cleanup_task: asyncio.Task[object] | None = None
+        self.webhook_monitor_task: asyncio.Task[object] | None = None
+        self.last_master_webhook_received_at: float | None = None
         self.master_bot = Bot(settings.master_bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
         self.master_dp = Dispatcher()
         self._failure_times: dict[int, deque[float]] = defaultdict(deque)
@@ -115,6 +117,8 @@ class BotManager:
             asyncio.create_task(self.start_bot(bot_id))
         self.supervisor_task = asyncio.create_task(self._supervisor_loop())
         self.room_cleanup_task = asyncio.create_task(self._room_cleanup_loop())
+        if self.settings.mode == "webhook":
+            self.webhook_monitor_task = asyncio.create_task(self._webhook_monitor_loop())
 
     async def register_bot(self, token: str, owner_id: int) -> BotInfo:
         async with self.lock:
@@ -312,6 +316,60 @@ class BotManager:
             except Exception:
                 self.logger.exception("pending_update_replay_failed bot_id=%s update_id=%s", bot_id, item.get("update_id"))
 
+    async def reconcile_master_webhook(self, *, reason: str) -> None:
+        """Re-register the Master webhook without dropping queued updates.
+
+        This is intentionally safe to call after the HTTP server is listening.
+        Telegram keeps pending updates when drop_pending_updates=False and can
+        retry delivery when the public endpoint becomes reachable.
+        """
+        if self.settings.mode != "webhook" or self.shutting_down:
+            return
+        url = self.settings.webhook_base_url + self.settings.master_webhook_path
+        try:
+            await self.master_bot.set_webhook(
+                url=url,
+                secret_token=self.settings.webhook_secret,
+                allowed_updates=TELEGRAM_ALLOWED_UPDATES,
+                max_connections=self.settings.telegram_max_connections,
+                drop_pending_updates=False,
+            )
+            info = await self.master_bot.get_webhook_info()
+            actual = set(info.allowed_updates or [])
+            expected = set(TELEGRAM_ALLOWED_UPDATES)
+            self.logger.info(
+                "master_webhook_reconciled reason=%s url_ok=%s allowed_ok=%s pending=%s last_error=%s",
+                reason,
+                info.url == url,
+                actual == expected,
+                info.pending_update_count,
+                info.last_error_message,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self.logger.exception("master_webhook_reconcile_failed reason=%s", reason)
+
+    async def _webhook_monitor_loop(self) -> None:
+        """Repair the webhook after HTTP readiness and when delivery appears stalled."""
+        await asyncio.sleep(8)
+        while not self.shutting_down:
+            try:
+                await self.reconcile_master_webhook(reason="post_start")
+                info = await self.master_bot.get_webhook_info()
+                now = time.monotonic()
+                last_received = self.last_master_webhook_received_at
+                if (
+                    info.pending_update_count
+                    and (last_received is None or now - last_received > 20)
+                ):
+                    await self.reconcile_master_webhook(reason="pending_delivery_stall")
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self.logger.exception("webhook_monitor_error")
+            await asyncio.sleep(30)
+
     async def _supervisor_loop(self) -> None:
         while not self.shutting_down:
             await asyncio.sleep(10)
@@ -431,6 +489,9 @@ class BotManager:
         if self.room_cleanup_task:
             self.room_cleanup_task.cancel()
             await asyncio.gather(self.room_cleanup_task, return_exceptions=True)
+        if self.webhook_monitor_task:
+            self.webhook_monitor_task.cancel()
+            await asyncio.gather(self.webhook_monitor_task, return_exceptions=True)
         bots = list(self.registry)
         for bot_id in bots:
             try:

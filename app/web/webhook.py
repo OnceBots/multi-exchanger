@@ -30,6 +30,7 @@ def build_webhook_router(platform) -> APIRouter:
         payload = await parse_payload(request)
         update_id = payload.get("update_id")
         update_kind = "callback_query" if payload.get("callback_query") else "message" if payload.get("message") else "other"
+        platform.manager.last_master_webhook_received_at = asyncio.get_running_loop().time()
         logger.info("master_webhook_received update_id=%s kind=%s keys=%s", update_id, update_kind, list(payload.keys()))
         task = asyncio.create_task(
             platform.manager.master_dp.feed_raw_update(platform.manager.master_bot, payload),
