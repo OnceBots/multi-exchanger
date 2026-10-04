@@ -1,3 +1,12 @@
+## v8 - Consolidated webhook + creation fix
+
+- Consolidated the working webhook reconciliation from v5 with the child creation flow from v7.
+- Explicit Master and child `allowed_updates`: `message`, `callback_query`.
+- Added periodic Master webhook reconciliation after startup.
+- Added explicit `HEAD /` returning 200 for Render health probes.
+- Added webhook task exception observation and detailed update-type logs.
+- Preserved public child creation and privacy-oriented UI from v6/v7.
+
 # Changelog
 
 ## v6 — 2026-10-04

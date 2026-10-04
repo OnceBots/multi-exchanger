@@ -68,13 +68,74 @@ class BotManager:
         self.master_dp.include_router(build_master_router(self))
         if self.settings.mode == "webhook":
             url = self.settings.webhook_base_url + self.settings.master_webhook_path
-            await self.master_bot.set_webhook(url=url, secret_token=self.settings.webhook_secret, allowed_updates=self.master_dp.resolve_used_update_types(), max_connections=self.settings.telegram_max_connections, drop_pending_updates=self.settings.drop_pending_updates)
+            allowed_updates = ["message", "callback_query"]
+            await self.master_bot.set_webhook(
+                url=url,
+                secret_token=self.settings.webhook_secret,
+                allowed_updates=allowed_updates,
+                max_connections=self.settings.telegram_max_connections,
+                drop_pending_updates=self.settings.drop_pending_updates,
+            )
             info = await self.master_bot.get_webhook_info()
             if info.url != url:
                 raise RuntimeError("El webhook del Master no coincide con la configuración")
-            self.logger.info("master_webhook_ready pending=%s", info.pending_update_count)
+            self.logger.info(
+                "master_webhook_ready url=%s pending=%s allowed=%s last_error=%s",
+                info.url,
+                info.pending_update_count,
+                info.allowed_updates,
+                info.last_error_message,
+            )
         else:
             self.master_dp_task = asyncio.create_task(self.master_dp.start_polling(self.master_bot, handle_signals=False))
+
+    async def reconcile_master_webhook(self, reason: str = "manual") -> None:
+        if self.settings.mode != "webhook" or self.shutting_down:
+            return
+        url = self.settings.webhook_base_url + self.settings.master_webhook_path
+        allowed_updates = ["message", "callback_query"]
+        try:
+            info = await self.master_bot.get_webhook_info()
+            needs_repair = (
+                info.url != url
+                or list(info.allowed_updates or []) != allowed_updates
+                or bool(info.last_error_message)
+            )
+            if needs_repair:
+                self.logger.warning(
+                    "master_webhook_repair reason=%s url_ok=%s allowed_ok=%s last_error=%s pending=%s",
+                    reason,
+                    info.url == url,
+                    list(info.allowed_updates or []) == allowed_updates,
+                    info.last_error_message,
+                    info.pending_update_count,
+                )
+                await self.master_bot.set_webhook(
+                    url=url,
+                    secret_token=self.settings.webhook_secret,
+                    allowed_updates=allowed_updates,
+                    max_connections=self.settings.telegram_max_connections,
+                    drop_pending_updates=False,
+                )
+                info = await self.master_bot.get_webhook_info()
+            self.logger.info(
+                "master_webhook_reconciled reason=%s url_ok=%s allowed_ok=%s pending=%s last_error=%s",
+                reason,
+                info.url == url,
+                list(info.allowed_updates or []) == allowed_updates,
+                info.pending_update_count,
+                info.last_error_message,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self.logger.exception("master_webhook_reconcile_failed reason=%s", reason)
+
+    async def master_webhook_reconcile_loop(self) -> None:
+        await asyncio.sleep(8)
+        while not self.shutting_down:
+            await self.reconcile_master_webhook(reason="periodic")
+            await asyncio.sleep(30)
 
     async def bootstrap_children(self) -> None:
         for doc in await self.repositories.bots.list_enabled():
@@ -138,7 +199,13 @@ class BotManager:
                 dp.include_router(build_router(ctx))
                 if self.settings.mode == "webhook":
                     url = f"{self.settings.webhook_base_url}/telegram/webhook/{bot_id}"
-                    await bot.set_webhook(url=url, secret_token=secret, allowed_updates=dp.resolve_used_update_types(), max_connections=self.settings.telegram_max_connections, drop_pending_updates=self.settings.drop_pending_updates)
+                    await bot.set_webhook(
+                        url=url,
+                        secret_token=secret,
+                        allowed_updates=["message", "callback_query"],
+                        max_connections=self.settings.telegram_max_connections,
+                        drop_pending_updates=self.settings.drop_pending_updates,
+                    )
                     wh = await bot.get_webhook_info()
                     if wh.url != url:
                         raise RuntimeError("Webhook del bot hijo no coincide")

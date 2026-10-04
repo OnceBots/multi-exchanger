@@ -11,6 +11,10 @@ def build_router(platform) -> APIRouter:
     async def root():
         return {"service": platform.settings.service_name, "status": "ok", "environment": platform.settings.environment}
 
+    @router.head("/")
+    async def root_head():
+        return PlainTextResponse("")
+
     @router.get(platform.settings.health_path)
     async def health():
         return {"status": "ok", "service": platform.settings.service_name, "environment": platform.settings.environment}
