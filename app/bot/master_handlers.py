@@ -10,6 +10,16 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 def build_master_router(manager) -> Router:
     router = Router(name="master")
 
+    def _is_text_command(message: Message, command: str) -> bool:
+        text = (message.text or "").strip()
+        first = text.split(maxsplit=1)[0] if text else ""
+        if not first.startswith("/"):
+            return False
+        command_part = first[1:]
+        if "@" in command_part:
+            command_part = command_part.split("@", 1)[0]
+        return command_part.lower() == command.lower()
+
     def is_admin(message: Message) -> bool:
         return bool(message.from_user and int(message.from_user.id) in manager.settings.admin_ids)
 
@@ -61,6 +71,12 @@ def build_master_router(manager) -> Router:
 
     @router.message(CommandStart())
     async def start(message: Message) -> None:
+        await show_start(message)
+
+    # Fallback robusto para instalaciones/webhook que entreguen el texto
+    # del comando sin entidades de Telegram.
+    @router.message(lambda message: _is_text_command(message, "start"))
+    async def start_text_fallback(message: Message) -> None:
         await show_start(message)
 
     @router.message(Command("add_bot"))

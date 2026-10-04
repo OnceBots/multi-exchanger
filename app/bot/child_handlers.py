@@ -90,6 +90,16 @@ def _room_management_kb(room: dict, can_global: bool = False) -> InlineKeyboardM
 def build_router(ctx) -> Router:
     router = Router(name=f"child-{ctx.bot_id}")
 
+    def _is_text_command(message: Message, command: str) -> bool:
+        text = (message.text or "").strip()
+        first = text.split(maxsplit=1)[0] if text else ""
+        if not first.startswith("/"):
+            return False
+        command_part = first[1:]
+        if "@" in command_part:
+            command_part = command_part.split("@", 1)[0]
+        return command_part.lower() == command.lower()
+
     async def upsert_user(message: Message) -> None:
         if message.from_user:
             await ctx.repositories.user.upsert(
@@ -119,6 +129,13 @@ def build_router(ctx) -> Router:
 
     @router.message(CommandStart())
     async def start(message: Message) -> None:
+        await _handle_start(message)
+
+    @router.message(lambda message: _is_text_command(message, "start"))
+    async def start_text_fallback(message: Message) -> None:
+        await _handle_start(message)
+
+    async def _handle_start(message: Message) -> None:
         await upsert_user(message)
         uid = int(message.from_user.id) if message.from_user else 0
         if uid in ctx.settings.admin_ids:
