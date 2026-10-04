@@ -39,7 +39,7 @@ class MediaRepository:
     async def append_group(self, bot_id: int, room_id: str, media_group_id: str, item: dict, sender_id: int, source_chat_id: int, caption: str | None) -> None:
         await self.groups.update_one(
             {"bot_id": bot_id, "room_id": room_id, "media_group_id": media_group_id},
-            {"$setOnInsert": {"bot_id": bot_id, "room_id": room_id, "media_group_id": media_group_id, "sender_id": sender_id, "source_chat_id": source_chat_id, "items": [], "caption": caption, "created_at": datetime.utcnow(), "status": "COLLECTING"}, "$push": {"items": item}},
+            {"$setOnInsert": {"bot_id": bot_id, "room_id": room_id, "media_group_id": media_group_id, "sender_id": sender_id, "source_chat_id": source_chat_id, "items": [], "caption": caption, "created_at": datetime.utcnow(), "status": "COLLECTING"}, "$set": {"updated_at": datetime.utcnow()}, "$push": {"items": item}},
             upsert=True,
         )
 

@@ -32,6 +32,7 @@ class BotRuntime:
     stop_event: asyncio.Event = field(default_factory=asyncio.Event)
     broadcast_queue: asyncio.Queue[dict] | None = None
     album_queue: asyncio.Queue[dict] | None = None
+    admin_feed_queue: asyncio.Queue[dict] | None = None
     metrics: Metrics = field(default_factory=Metrics)
     restart_history: list[float] = field(default_factory=list)
     logger: logging.Logger = field(default_factory=lambda: logging.getLogger("bot.runtime"))

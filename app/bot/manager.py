@@ -29,6 +29,7 @@ class BotRegistry(dict[int, BotRuntime]):
 
 class RepositoryBundle:
     def __init__(self, mongo) -> None:
+        from app.db.repositories.admin_feed import AdminFeedRepository
         from app.db.repositories.audit import AuditRepository
         from app.db.repositories.bots import BotRepository
         from app.db.repositories.media import MediaRepository
@@ -41,6 +42,7 @@ class RepositoryBundle:
         self.media = MediaRepository(mongo)
         self.session = SessionRepository(mongo)
         self.audit = AuditRepository(mongo)
+        self.admin_feed = AdminFeedRepository(mongo)
 
 
 class BotManager:
@@ -53,6 +55,7 @@ class BotManager:
         self.logger = logging.getLogger("bot.manager")
         self.lock = asyncio.Lock()
         self.supervisor_task: asyncio.Task[object] | None = None
+        self.room_cleanup_task: asyncio.Task[object] | None = None
         self.master_bot = Bot(settings.master_bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
         self.master_dp = Dispatcher()
         self._failure_times: dict[int, deque[float]] = defaultdict(deque)
@@ -78,6 +81,7 @@ class BotManager:
             bot_id = int(doc["bot_id"])
             asyncio.create_task(self.start_bot(bot_id))
         self.supervisor_task = asyncio.create_task(self._supervisor_loop())
+        self.room_cleanup_task = asyncio.create_task(self._room_cleanup_loop())
 
     async def register_bot(self, token: str, owner_id: int) -> BotInfo:
         async with self.lock:
@@ -93,7 +97,7 @@ class BotManager:
                 "webhook_secret_encrypted": self.token_service.encrypt(secret),
                 "enabled": True,
                 "status": BotStatus.CREATED.value,
-                "config": {"features": {"media": True, "rooms": True, "webapp": True}, "language": "es", "max_members_default": 100},
+                "config": {"features": {"media": True, "rooms": True, "webapp": True, "admin_feed": True}, "language": "es", "max_members_default": 100},
                 "restart_count": 0,
                 "last_error": None,
                 "created_at": datetime.utcnow(),
@@ -101,7 +105,10 @@ class BotManager:
             }
             await self.repositories.bots.create(info_doc)
         await self.start_bot(bot_id)
-        return BotInfo.from_document(info_doc)
+        stored = await self.repositories.bots.get(bot_id)
+        info = BotInfo.from_document(stored or info_doc)
+        await self.notify_admins_new_bot(info, owner_id)
+        return info
 
     async def start_bot(self, bot_id: int) -> str:
         async with self.lock:
@@ -143,9 +150,12 @@ class BotManager:
                 runtime.restart_count = info.restart_count
                 runtime.broadcast_queue = asyncio.Queue(maxsize=self.settings.room_queue_maxsize)
                 runtime.album_queue = asyncio.Queue(maxsize=self.settings.room_queue_maxsize)
+                runtime.admin_feed_queue = asyncio.Queue(maxsize=self.settings.room_queue_maxsize)
                 for _ in range(self.settings.broadcast_workers_per_bot):
                     runtime.add_task(self._broadcast_worker(runtime))
                     runtime.add_task(self._album_worker(runtime))
+                for _ in range(max(1, min(2, self.settings.broadcast_workers_per_bot))):
+                    runtime.add_task(self._admin_feed_worker(runtime))
                 await self.repositories.bots.mark_started(bot_id)
                 runtime.add_task(self._heartbeat_loop(runtime))
                 runtime.add_task(self._replay_pending_updates(bot_id))
@@ -298,6 +308,57 @@ class BotManager:
             finally:
                 runtime.album_queue.task_done()
 
+    async def _admin_feed_worker(self, runtime: BotRuntime) -> None:
+        assert runtime.admin_feed_queue is not None
+        while not runtime.stop_event.is_set():
+            job = await runtime.admin_feed_queue.get()
+            try:
+                await runtime.ctx.services.admin_feed.process(job)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                runtime.logger.exception("admin_feed_worker_failed bot_id=%s", runtime.info.bot_id)
+            finally:
+                runtime.admin_feed_queue.task_done()
+
+    async def notify_admins_new_bot(self, info: BotInfo, creator_id: int) -> None:
+        name = f"@{info.username}" if info.username else str(info.bot_id)
+        text = (
+            "<b>🚀 NUEVO BOT HIJO</b>\n\n"
+            f"🤖 <b>{name}</b>\n"
+            f"🆔 <code>{info.bot_id}</code>\n"
+            f"👤 Creador: <code>{creator_id}</code>\n"
+            "🟢 Estado: <b>RUNNING</b>\n\n"
+            "Este bot ya está disponible. Al entrar como administrador al bot hijo, "
+            "el <b>feed administrativo</b> se activa automáticamente."
+        )
+        from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+        rows = []
+        if info.username:
+            rows.append([InlineKeyboardButton(text="🤖 Abrir bot", url=f"https://t.me/{info.username}")])
+        rows.append([
+            InlineKeyboardButton(text="📊 Ver estado", callback_data=f"master:botinfo:{info.bot_id}"),
+            InlineKeyboardButton(text="🔄 Reiniciar", callback_data=f"master:restart:{info.bot_id}"),
+        ])
+        markup = InlineKeyboardMarkup(inline_keyboard=rows)
+        for admin_id in self.settings.admin_ids:
+            try:
+                await self.master_bot.send_message(admin_id, text, reply_markup=markup)
+            except Exception:
+                self.logger.exception("admin_notification_failed admin_id=%s bot_id=%s", admin_id, info.bot_id)
+
+    async def _room_cleanup_loop(self) -> None:
+        while not self.shutting_down:
+            await asyncio.sleep(60)
+            try:
+                expired = await self.repositories.room.expire_due()
+                if expired:
+                    self.logger.info("rooms_expired count=%s", expired)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self.logger.exception("room_cleanup_loop_error")
+
     async def _heartbeat_loop(self, runtime: BotRuntime) -> None:
         while not self.shutting_down and runtime.status == BotStatus.RUNNING:
             await asyncio.sleep(self.settings.heartbeat_interval_seconds)
@@ -309,6 +370,9 @@ class BotManager:
         if self.supervisor_task:
             self.supervisor_task.cancel()
             await asyncio.gather(self.supervisor_task, return_exceptions=True)
+        if self.room_cleanup_task:
+            self.room_cleanup_task.cancel()
+            await asyncio.gather(self.room_cleanup_task, return_exceptions=True)
         bots = list(self.registry)
         for bot_id in bots:
             try:

@@ -1,25 +1,113 @@
 <!doctype html>
 <html lang="es">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>MultiBot Rooms</title>
-<link rel="stylesheet" href="/app/static/style.css">
-<script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#0f172a">
+  <title>Multimedia Hub</title>
+  <link rel="stylesheet" href="/app/static/style.css">
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
-<main class="shell">
-  <header><h1>🎬 Salas</h1><p id="status">Conectando…</p></header>
-  <section id="rooms" class="grid"></section>
-  <section class="card">
-    <h2>➕ Crear sala</h2>
-    <input id="name" placeholder="Nombre">
-    <input id="description" placeholder="Descripción">
-    <select id="visibility"><option value="PUBLIC">Pública</option><option value="PRIVATE">Privada</option></select>
-    <input id="max" type="number" value="100" min="0">
-    <button onclick="createRoom()">Crear</button>
-  </section>
-</main>
-<script src="/app/static/app.js"></script>
+  <div class="app-bg"></div>
+  <main class="app-shell">
+    <header class="topbar glass">
+      <div class="brand-wrap">
+        <div class="brand-mark">◈</div>
+        <div>
+          <div class="eyebrow" id="botLabel">MULTIMEDIA HUB</div>
+          <h1 id="pageTitle">Inicio</h1>
+        </div>
+      </div>
+      <button class="icon-btn" id="refreshBtn" aria-label="Actualizar">↻</button>
+    </header>
+
+    <section id="viewHome" class="view active">
+      <div class="hero glass">
+        <div class="hero-copy">
+          <span class="pill success" id="connectionPill">● Conectando</span>
+          <h2>Tu espacio para compartir contenido.</h2>
+          <p>Explora salas, crea comunidades y comparte multimedia de forma rápida y anónima.</p>
+        </div>
+        <div class="hero-actions">
+          <button class="primary" data-go="create">＋ Crear sala</button>
+          <button class="secondary" data-go="explore">Explorar</button>
+        </div>
+      </div>
+      <div class="section-head"><div><span class="eyebrow">DESCUBRIR</span><h3>Salas públicas</h3></div><button class="link-btn" data-go="explore">Ver todas →</button></div>
+      <div id="homeRooms" class="room-grid"></div>
+      <div class="feature-grid">
+        <button class="feature-card glass" data-go="mine"><span>🏠</span><strong>Mis salas</strong><small>Comunidades que ya sigues</small></button>
+        <button class="feature-card glass" data-go="create"><span>✨</span><strong>Crear comunidad</strong><small>Configura permisos y expiración</small></button>
+        <button class="feature-card glass" id="openHelp"><span>📖</span><strong>Manual</strong><small>Aprende cómo funciona</small></button>
+      </div>
+    </section>
+
+    <section id="viewExplore" class="view">
+      <div class="toolbar glass">
+        <div class="segment" id="scopeSwitch">
+          <button class="segment-btn active" data-scope="public">Públicas</button>
+          <button class="segment-btn" data-scope="mine">Mis salas</button>
+        </div>
+        <button class="icon-btn" id="exploreRefresh" aria-label="Actualizar">↻</button>
+      </div>
+      <div id="exploreRooms" class="room-grid"></div>
+    </section>
+
+    <section id="viewCreate" class="view">
+      <div class="panel glass">
+        <div class="section-head"><div><span class="eyebrow">NUEVA COMUNIDAD</span><h3>Crear sala</h3></div></div>
+        <label>Nombre<input id="roomName" maxlength="80" placeholder="Ej. Videoteca nocturna"></label>
+        <label>Descripción<textarea id="roomDescription" maxlength="500" placeholder="¿De qué trata esta sala?"></textarea></label>
+        <div class="two-col">
+          <label>Visibilidad<select id="roomVisibility"><option value="PUBLIC">🌎 Pública</option><option value="PRIVATE">🔒 Privada</option></select></label>
+          <label>Capacidad<input id="roomMax" type="number" min="1" value="100"></label>
+        </div>
+        <label>Duración<select id="roomDuration"><option value="0">♾️ Sin expiración</option><option value="10">10 minutos</option><option value="30">30 minutos</option><option value="60">1 hora</option><option value="360">6 horas</option><option value="720">12 horas</option><option value="1440">24 horas</option><option value="10080">7 días</option></select></label>
+        <div class="subsection-title">Permisos multimedia</div>
+        <div class="toggle-grid">
+          <button class="toggle on" data-toggle="allow_photo">📸 Fotos</button>
+          <button class="toggle on" data-toggle="allow_video">🎬 Vídeos</button>
+          <button class="toggle on" data-toggle="allow_files">📎 Archivos</button>
+          <button class="toggle on" data-toggle="allow_albums">🖼️ Álbumes</button>
+          <button class="toggle on full" data-toggle="anonymous_media">🕶️ Anonimato de identidad</button>
+        </div>
+        <button class="primary wide" id="createRoomBtn">Crear sala ahora</button>
+      </div>
+    </section>
+
+    <section id="viewMine" class="view">
+      <div class="section-head"><div><span class="eyebrow">TU ESPACIO</span><h3>Mis salas</h3></div></div>
+      <div id="mineRooms" class="room-grid"></div>
+    </section>
+
+    <section id="viewProfile" class="view">
+      <div id="profileCard" class="profile-card glass"></div>
+      <div class="panel glass">
+        <div class="section-head"><div><span class="eyebrow">PREFERENCIAS</span><h3>Idioma</h3></div></div>
+        <div class="language-grid">
+          <button class="language-btn" data-lang="es">🇪🇸 Español</button>
+          <button class="language-btn" data-lang="en">🇺🇸 English</button>
+          <button class="language-btn" data-lang="pt">🇧🇷 Português</button>
+        </div>
+      </div>
+    </section>
+
+    <nav class="bottom-nav glass">
+      <button class="nav-btn active" data-go="home"><span>⌂</span><small>Inicio</small></button>
+      <button class="nav-btn" data-go="explore"><span>⌕</span><small>Explorar</small></button>
+      <button class="nav-btn center" data-go="create"><span>＋</span><small>Crear</small></button>
+      <button class="nav-btn" data-go="mine"><span>▣</span><small>Mis salas</small></button>
+      <button class="nav-btn" data-go="profile"><span>◉</span><small>Perfil</small></button>
+    </nav>
+  </main>
+
+  <div id="modal" class="modal hidden" aria-hidden="true">
+    <div class="modal-backdrop" data-close="1"></div>
+    <div class="modal-card glass" id="modalContent"></div>
+  </div>
+  <div id="toast" class="toast"></div>
+
+  <script src="/app/static/app.js"></script>
 </body>
 </html>

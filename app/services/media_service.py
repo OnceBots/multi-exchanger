@@ -4,47 +4,105 @@ import asyncio
 import secrets
 
 
+ADMIN_FEED_ROOM_KEY = "__ADMIN_FEED__"
+
+
 class MediaService:
     def __init__(self, ctx) -> None:
         self.ctx = ctx
         self.repo = ctx.repositories.media
         self.room_repo = ctx.repositories.room
         self.broadcast = ctx.services.broadcast
+        self.admin_feed = ctx.services.admin_feed
         self.rate = ctx.services.media_rate
         self.album_rate = ctx.services.album_rate
 
+    @staticmethod
+    def _allowed_type(room: dict, content_type: str) -> bool:
+        settings = room.get("settings", {})
+        mapping = {"photo": "allow_photo", "video": "allow_video", "document": "allow_files", "animation": "allow_video"}
+        key = mapping.get(content_type)
+        return bool(settings.get(key, True)) if key else True
+
     async def handle_message(self, message) -> str:
-        if not (message.photo or message.video or message.document or message.animation):
-            return "ignored"
-        uid = int(message.from_user.id)
+        uid = int(message.from_user.id) if message.from_user else 0
         if message.media_group_id:
             if not self.album_rate.allow(str(uid)):
                 await message.answer("⚠️ Demasiados álbumes en poco tiempo.")
                 return "rate_limited"
-        elif not self.rate.allow(str(uid)):
-            await message.answer("⚠️ Demasiado contenido en poco tiempo.")
-            return "rate_limited"
-        user = await self.ctx.repositories.user.get(self.ctx.bot_id, uid)
+        elif message.photo or message.video or message.document or message.animation:
+            if not self.rate.allow(str(uid)):
+                await message.answer("⚠️ Demasiado contenido en poco tiempo.")
+                return "rate_limited"
+
+        user = await self.ctx.repositories.user.get(self.ctx.bot_id, uid) if uid else None
         room_id = user.get("active_room_id") if user else None
-        if not room_id:
-            await message.answer("Primero crea o únete a una sala con /rooms o /create_room.")
-            return "no_room"
+        room = await self.room_repo.get(self.ctx.bot_id, room_id) if room_id else None
+        if room and room.get("status") != "ACTIVE":
+            room_id = None
+        membership = await self.room_repo.get_membership(self.ctx.bot_id, room["room_id"], uid) if room else None
+        if membership and (membership.get("banned") or membership.get("muted")):
+            room_id = None
+        feed_enabled = await self.ctx.repositories.admin_feed.count(self.ctx.bot_id) > 0
+
+        # Direct Admin Feed is independent from rooms.
         if message.media_group_id:
             item = self.normalize(message)
-            await self.repo.append_group(self.ctx.bot_id, room_id, message.media_group_id, item, uid, int(message.chat.id), message.caption)
-            self.ctx.runtime.add_task(self.flush_album(room_id, message.media_group_id))
-            return "album"
-        event_id = f"msg:{message.chat.id}:{message.message_id}"
-        try:
-            await self.repo.create_event(bot_id=self.ctx.bot_id, room_id=room_id, sender_id=uid, source_chat_id=int(message.chat.id), source_message_id=int(message.message_id), media_group_id=None, type=message.content_type, media_unique_id=self.normalize(message)["file_unique_id"], status="QUEUED", processing_id=secrets.token_urlsafe(8), event_key=event_id)
-        except Exception as exc:
-            if exc.__class__.__name__ == "DuplicateKeyError":
-                return "duplicate"
-            raise
-        await self.broadcast.enqueue_single(room_id, uid, int(message.chat.id), int(message.message_id), event_id, message)
-        return "queued"
+            if room_id and room and self._allowed_type(room, message.content_type):
+                await self.repo.append_group(self.ctx.bot_id, room_id, message.media_group_id, item, uid, int(message.chat.id), message.caption)
+                self.ctx.runtime.add_task(self.flush_album(room_id, message.media_group_id, target="room"))
+            if feed_enabled:
+                await self.repo.append_group(self.ctx.bot_id, ADMIN_FEED_ROOM_KEY, message.media_group_id, item, uid, int(message.chat.id), message.caption)
+                self.ctx.runtime.add_task(self.flush_album(ADMIN_FEED_ROOM_KEY, message.media_group_id, target="admin_feed"))
+            if not room_id and not feed_enabled:
+                await message.answer("🏠 Primero crea o únete a una sala para compartir este álbum.")
+                return "no_destination"
+            return "album_queued"
 
-    async def flush_album(self, room_id: str, group_id: str) -> None:
+        if message.photo or message.video or message.document or message.animation:
+            event_id = f"msg:{message.chat.id}:{message.message_id}"
+            normalized = self.normalize(message)
+            if room_id:
+                try:
+                    await self.repo.create_event(
+                        bot_id=self.ctx.bot_id,
+                        room_id=room_id,
+                        sender_id=uid,
+                        source_chat_id=int(message.chat.id),
+                        source_message_id=int(message.message_id),
+                        media_group_id=None,
+                        type=message.content_type,
+                        media_unique_id=normalized["file_unique_id"],
+                        status="QUEUED",
+                        processing_id=secrets.token_urlsafe(8),
+                        event_key=event_id,
+                    )
+                except Exception as exc:
+                    if exc.__class__.__name__ == "DuplicateKeyError":
+                        return "duplicate"
+                    raise
+                if room and not self._allowed_type(room, message.content_type):
+                    await message.answer("⛔ Este tipo de multimedia está desactivado en la sala.")
+                else:
+                    await self.broadcast.enqueue_single(room_id, uid, int(message.chat.id), int(message.message_id), event_id, message)
+            if feed_enabled:
+                await self.admin_feed.enqueue_message(message)
+            if not room_id and not feed_enabled:
+                await message.answer("🏠 Primero crea o únete a una sala.\n\nSi eres administrador, entra una vez al bot para activar el feed administrativo.")
+                return "no_destination"
+            return "queued"
+
+        # Text/other direct content can be mirrored to the admin feed, but is not a room publication.
+        if message.text and not message.text.startswith("/"):
+            if feed_enabled:
+                await self.admin_feed.enqueue_message(message)
+                if not room_id:
+                    return "admin_feed_only"
+            await message.answer("📦 En las salas se publican fotos, vídeos, archivos y álbumes.\n\nUsa el menú para gestionar tu sala.")
+            return "text"
+        return "ignored"
+
+    async def flush_album(self, room_id: str, group_id: str, target: str) -> None:
         await asyncio.sleep(self.ctx.settings.album_debounce_ms / 1000)
         group = await self.repo.get_group(self.ctx.bot_id, room_id, group_id)
         if not group:
@@ -52,11 +110,14 @@ class MediaService:
         claimed = await self.repo.claim_group(self.ctx.bot_id, room_id, group_id)
         if not claimed:
             return
-        items = {int(i["message_id"]): i for i in group.get("items", [])}
-        group["items"] = list(items.values())
-        if not group["items"]:
+        items = {int(i["message_id"]): i for i in claimed.get("items", [])}
+        claimed["items"] = sorted(items.values(), key=lambda x: int(x["message_id"]))
+        if not claimed["items"]:
             return
-        await self.broadcast.enqueue_album(group)
+        if target == "admin_feed":
+            await self.admin_feed.enqueue_album(claimed)
+        else:
+            await self.broadcast.enqueue_album(claimed)
 
     @staticmethod
     def normalize(message) -> dict:
