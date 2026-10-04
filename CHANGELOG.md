@@ -17,3 +17,10 @@
 - Mini App redesigned with Telegram-aware theme variables, mobile-first layout, bottom navigation, skeletons, modals, toasts and room cards.
 - Mini App supports explore, my rooms, creation, details, join/leave, edit, permissions, moderation, profile and language preference.
 - Documentation updated for the new public Master and Admin Feed behaviour.
+
+
+## v2.1 webhook recovery hotfix
+- Force Telegram `message` and `callback_query` updates for Master and Child webhooks.
+- Verify `allowed_updates` and Telegram `last_error_message` during startup.
+- Re-register webhook automatically when URL or allowed updates mismatch.
+- Add explicit webhook receipt logging for update diagnostics.

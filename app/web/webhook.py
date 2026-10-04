@@ -27,9 +27,12 @@ def build_webhook_router(platform) -> APIRouter:
         if x_telegram_bot_api_secret_token != platform.settings.webhook_secret:
             raise HTTPException(status_code=403, detail="forbidden")
         payload = await parse_payload(request)
+        logger.info("child_webhook_received bot_id=%s update_id=%s keys=%s", bot_id, payload.get("update_id"), list(payload.keys()))
+        update_id = payload.get("update_id")
+        logger.info("master_webhook_received update_id=%s keys=%s", update_id, list(payload.keys()))
         task = asyncio.create_task(
             platform.manager.master_dp.feed_raw_update(platform.manager.master_bot, payload),
-            name=f"master-update-{payload.get('update_id', 'unknown')}",
+            name=f"master-update-{update_id or 'unknown'}",
         )
         task.add_done_callback(lambda done: _log_task_result(done, scope="master"))
         return {"ok": True}

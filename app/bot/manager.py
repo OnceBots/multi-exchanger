@@ -23,6 +23,9 @@ from app.services.webapp_auth import validate_init_data
 from app.utils.backoff import backoff_delay
 
 
+TELEGRAM_ALLOWED_UPDATES = ["message", "callback_query"]
+
+
 class BotRegistry(dict[int, BotRuntime]):
     pass
 
@@ -68,11 +71,41 @@ class BotManager:
         self.master_dp.include_router(build_master_router(self))
         if self.settings.mode == "webhook":
             url = self.settings.webhook_base_url + self.settings.master_webhook_path
-            await self.master_bot.set_webhook(url=url, secret_token=self.settings.webhook_secret, allowed_updates=self.master_dp.resolve_used_update_types(), max_connections=self.settings.telegram_max_connections, drop_pending_updates=self.settings.drop_pending_updates)
+            await self.master_bot.set_webhook(
+                url=url,
+                secret_token=self.settings.webhook_secret,
+                allowed_updates=TELEGRAM_ALLOWED_UPDATES,
+                max_connections=self.settings.telegram_max_connections,
+                drop_pending_updates=self.settings.drop_pending_updates,
+            )
             info = await self.master_bot.get_webhook_info()
+            expected = set(TELEGRAM_ALLOWED_UPDATES)
+            actual = set(info.allowed_updates or [])
+            if info.url != url or actual != expected:
+                self.logger.warning(
+                    "master_webhook_mismatch url_ok=%s allowed_ok=%s actual_allowed=%s expected_allowed=%s",
+                    info.url == url, actual == expected, info.allowed_updates, TELEGRAM_ALLOWED_UPDATES,
+                )
+                await self.master_bot.delete_webhook(drop_pending_updates=False)
+                await asyncio.sleep(0.25)
+                await self.master_bot.set_webhook(
+                    url=url,
+                    secret_token=self.settings.webhook_secret,
+                    allowed_updates=TELEGRAM_ALLOWED_UPDATES,
+                    max_connections=self.settings.telegram_max_connections,
+                    drop_pending_updates=False,
+                )
+                info = await self.master_bot.get_webhook_info()
             if info.url != url:
                 raise RuntimeError("El webhook del Master no coincide con la configuración")
-            self.logger.info("master_webhook_ready pending=%s", info.pending_update_count)
+            if info.last_error_message:
+                self.logger.warning(
+                    "master_webhook_last_error error=%s", info.last_error_message
+                )
+            self.logger.info(
+                "master_webhook_ready url=%s pending=%s allowed=%s last_error=%s",
+                info.url, info.pending_update_count, info.allowed_updates, info.last_error_message,
+            )
         else:
             self.master_dp_task = asyncio.create_task(self.master_dp.start_polling(self.master_bot, handle_signals=False))
 
@@ -138,10 +171,35 @@ class BotManager:
                 dp.include_router(build_router(ctx))
                 if self.settings.mode == "webhook":
                     url = f"{self.settings.webhook_base_url}/telegram/webhook/{bot_id}"
-                    await bot.set_webhook(url=url, secret_token=secret, allowed_updates=dp.resolve_used_update_types(), max_connections=self.settings.telegram_max_connections, drop_pending_updates=self.settings.drop_pending_updates)
+                    await bot.set_webhook(
+                        url=url,
+                        secret_token=secret,
+                        allowed_updates=TELEGRAM_ALLOWED_UPDATES,
+                        max_connections=self.settings.telegram_max_connections,
+                        drop_pending_updates=self.settings.drop_pending_updates,
+                    )
                     wh = await bot.get_webhook_info()
+                    expected = set(TELEGRAM_ALLOWED_UPDATES)
+                    actual = set(wh.allowed_updates or [])
+                    if wh.url != url or actual != expected:
+                        self.logger.warning(
+                            "child_webhook_mismatch bot_id=%s url_ok=%s allowed_ok=%s actual_allowed=%s expected_allowed=%s",
+                            bot_id, wh.url == url, actual == expected, wh.allowed_updates, TELEGRAM_ALLOWED_UPDATES,
+                        )
+                        await bot.delete_webhook(drop_pending_updates=False)
+                        await asyncio.sleep(0.25)
+                        await bot.set_webhook(
+                            url=url,
+                            secret_token=secret,
+                            allowed_updates=TELEGRAM_ALLOWED_UPDATES,
+                            max_connections=self.settings.telegram_max_connections,
+                            drop_pending_updates=False,
+                        )
+                        wh = await bot.get_webhook_info()
                     if wh.url != url:
                         raise RuntimeError("Webhook del bot hijo no coincide")
+                    if wh.last_error_message:
+                        self.logger.warning("child_webhook_last_error bot_id=%s error=%s", bot_id, wh.last_error_message)
                     runtime.status = BotStatus.RUNNING
                 else:
                     runtime.status = BotStatus.RUNNING
