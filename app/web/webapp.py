@@ -19,7 +19,6 @@ class CreateBotBody(BaseModel):
 class CreateRoomBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    name: str = Field(min_length=1, max_length=80)
     visibility: str = Field(default=RoomVisibility.PUBLIC.value)
     max_members: int = Field(default=100, ge=2, le=10000)
     duration_minutes: int = Field(default=0, ge=0, le=43200)
@@ -39,13 +38,19 @@ def build_webapp_router(platform) -> APIRouter:
     logger = logging.getLogger("webapp")
     static_dir = Path(__file__).resolve().parent / "static"
 
+    no_cache = {
+        "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+        "Pragma": "no-cache",
+        "Expires": "0",
+    }
+
     @router.get("/master-app", response_class=HTMLResponse)
     async def master_app():
-        return HTMLResponse((static_dir / "master.html").read_text(encoding="utf-8"))
+        return HTMLResponse((static_dir / "master.html").read_text(encoding="utf-8"), headers=no_cache)
 
     @router.get("/app", response_class=HTMLResponse)
     async def child_app():
-        return HTMLResponse((static_dir / "child.html").read_text(encoding="utf-8"))
+        return HTMLResponse((static_dir / "child.html").read_text(encoding="utf-8"), headers=no_cache)
 
     def auth_child(request: Request, runtime):
         user, source = authenticate_webapp_request(
@@ -127,7 +132,6 @@ def build_webapp_router(platform) -> APIRouter:
         room = await runtime.ctx.services.rooms.create_room(
             bot_id,
             int(user["id"]),
-            body.name,
             body.visibility,
             body.max_members,
             {

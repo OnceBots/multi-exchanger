@@ -23,3 +23,10 @@ def test_all_router_builders_return_api_router():
     assert isinstance(build_router(platform), APIRouter)
     assert isinstance(build_webapp_router(platform), APIRouter)
     assert isinstance(build_webhook_router(platform), APIRouter)
+
+
+def test_child_callback_answer_is_not_recursive():
+    from pathlib import Path
+    source = Path("app/bot/child_handlers.py").read_text(encoding="utf-8")
+    assert "await callback.answer(*args, **kwargs)" in source
+    assert "await _safe_callback_answer(callback, *args, **kwargs)" not in source

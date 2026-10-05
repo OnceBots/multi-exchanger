@@ -1,3 +1,17 @@
+# v9 — Child UX, room identity and Mini App connection
+
+- Fixed recursive callback acknowledgement that made child inline buttons appear unresponsive.
+- Child room creation no longer asks for a custom room name.
+- New rooms are identified by a server-generated 7-character uppercase alphanumeric code.
+- Removed room name editing from the child bot.
+- Room creation API rejects custom name fields.
+- Added per-user Telegram Mini App menu configuration with short-lived signed fallback launch token.
+- Mini App now reads Telegram initData dynamically for every API request.
+- Added no-cache headers to Mini App HTML to prevent stale WebView assets after deploys.
+- Mini App create-room form now shows the generated 7-character code and share action.
+- Room repository prevents later changes to name/invite_code identity fields.
+- Preserved share links using `https://t.me/<child>?start=room_<CODE>`.
+
 
 ## v7 — room access code and sharing
 

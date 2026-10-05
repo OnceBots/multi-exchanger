@@ -17,7 +17,7 @@ class RoomRepository:
         alphabet = string.ascii_uppercase + string.digits
         return "".join(secrets.choice(alphabet) for _ in range(7))
 
-    async def create(self, bot_id: int, owner_id: int, name: str, visibility: str, max_members: int, settings: dict, duration_minutes: int) -> dict:
+    async def create(self, bot_id: int, owner_id: int, visibility: str, max_members: int, settings: dict, duration_minutes: int) -> dict:
         created = utcnow()
         expires_at = None
         if duration_minutes > 0:
@@ -38,7 +38,8 @@ class RoomRepository:
             "room_id": room_id,
             "invite_code": invite_code,
             "owner_id": owner_id,
-            "name": name,
+            # Backward-compatible label: the room name is the generated 7-char code.
+            "name": invite_code,
             "visibility": visibility,
             "max_members": max_members,
             "settings": settings,
@@ -130,8 +131,10 @@ class RoomRepository:
             await self.rooms.update_one({"bot_id": bot_id, "room_id": room_id}, {"$inc": {"member_count": -1}, "$set": {"updated_at": utcnow()}})
 
     async def update(self, bot_id: int, room_id: str, **fields) -> None:
-        # Descriptions are intentionally unsupported by the product.
+        # Room identity is immutable: no descriptions and no custom names.
         fields.pop("description", None)
+        fields.pop("name", None)
+        fields.pop("invite_code", None)
         fields["updated_at"] = utcnow()
         await self.rooms.update_one({"bot_id": bot_id, "room_id": room_id}, {"$set": fields})
 
