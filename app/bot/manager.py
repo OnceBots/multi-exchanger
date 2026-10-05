@@ -8,7 +8,7 @@ from collections import defaultdict, deque
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.exceptions import TelegramAPIError, TelegramUnauthorizedError
+from aiogram.exceptions import TelegramAPIError, TelegramUnauthorizedError, TelegramBadRequest
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, MenuButtonWebApp, WebAppInfo
 
 from app.bot.child_handlers import build_router as build_child_router
@@ -267,8 +267,24 @@ class BotManager:
             runtime.last_update_at = utcnow()
             self.logger.info("webhook_dispatch_result bot_id=%s update_id=%s result_type=%s", bot_id, update_id, type(result).__name__)
             if update_id is not None:
-                runtime.last_update_at = utcnow()
                 await self.repositories.media.mark_update(bot_id, int(update_id), "PROCESSED")
+        except TelegramBadRequest as exc:
+            # Callback queries expire quickly. This can happen after a Render restart
+            # when a persisted callback update is replayed, or after a delayed delivery.
+            message = str(exc).lower()
+            if "query is too old" in message or "query id is invalid" in message or "response timeout expired" in message:
+                if update_id is not None:
+                    await self.repositories.media.mark_update(bot_id, int(update_id), "SKIPPED")
+                runtime.last_update_at = utcnow()
+                self.logger.warning(
+                    "stale_callback_ignored bot_id=%s update_id=%s error=%s",
+                    bot_id, update_id, exc,
+                )
+                return
+            if update_id is not None:
+                await self.repositories.media.mark_update(bot_id, int(update_id), "FAILED")
+            self.logger.exception("webhook_dispatch_failed bot_id=%s update_id=%s", bot_id, update_id)
+            raise
         except Exception:
             if update_id is not None:
                 await self.repositories.media.mark_update(bot_id, int(update_id), "FAILED")
@@ -281,10 +297,20 @@ class BotManager:
             return
         self.logger.info("replaying_pending_updates bot_id=%s count=%s", bot_id, len(pending))
         for item in pending:
+            payload = item.get("payload") or {}
+            update_id = item.get("update_id")
+            # CallbackQuery IDs are short-lived and cannot be replayed after a
+            # restart. The user can simply press the button again. Replaying them
+            # only produces QUERY_ID_INVALID / "query is too old" errors.
+            if payload.get("callback_query"):
+                if update_id is not None:
+                    await self.repositories.media.mark_update(bot_id, int(update_id), "SKIPPED")
+                self.logger.info("stale_callback_replay_skipped bot_id=%s update_id=%s", bot_id, update_id)
+                continue
             try:
-                await self.handle_webhook_update(bot_id, item["payload"])
+                await self.handle_webhook_update(bot_id, payload)
             except Exception:
-                self.logger.exception("pending_update_replay_failed bot_id=%s update_id=%s", bot_id, item.get("update_id"))
+                self.logger.exception("pending_update_replay_failed bot_id=%s update_id=%s", bot_id, update_id)
 
     async def _broadcast_worker(self, runtime: BotRuntime) -> None:
         assert runtime.broadcast_queue is not None

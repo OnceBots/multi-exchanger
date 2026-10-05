@@ -13,6 +13,17 @@ from app.core.enums import MemberRole, RoomVisibility
 from app.services.room_service import RoomService
 
 
+
+
+async def _safe_callback_answer(callback: CallbackQuery, *args, **kwargs) -> None:
+    """Answer a callback without turning an expired query into a webhook failure."""
+    try:
+        await _safe_callback_answer(callback, *args, **kwargs)
+    except Exception as exc:
+        message = str(exc).lower()
+        if "query is too old" in message or "query id is invalid" in message or "response timeout expired" in message:
+            return
+        raise
 def _webapp_url(ctx, user_id: int) -> str:
     params = {
         "bot_id": str(ctx.bot_id),
@@ -151,7 +162,7 @@ def build_router(ctx) -> Router:
 
     @router.callback_query(F.data == "home")
     async def home(callback: CallbackQuery) -> None:
-        await callback.answer()
+        await _safe_callback_answer(callback)
         await callback.message.edit_text(
             f"<b>🎬 @{html.escape(ctx.bot_username or str(ctx.bot_id))}</b>\n\nSelecciona una opción:",
             reply_markup=_menu(ctx, int(callback.from_user.id)),
@@ -159,7 +170,7 @@ def build_router(ctx) -> Router:
 
     @router.callback_query(F.data == "help")
     async def help_callback(callback: CallbackQuery) -> None:
-        await callback.answer()
+        await _safe_callback_answer(callback)
         await callback.message.edit_text(
             "<b>❓ Cómo funciona</b>\n\n1. Crea o únete a una sala.\n2. Selecciona una sala activa.\n3. Envía multimedia.\n4. La plataforma la distribuye al resto de la sala.\n\nLa identidad del emisor no se muestra a los miembros.",
             reply_markup=_menu(ctx, int(callback.from_user.id)),
@@ -167,7 +178,7 @@ def build_router(ctx) -> Router:
 
     @router.callback_query(F.data == "profile")
     async def profile(callback: CallbackQuery) -> None:
-        await callback.answer()
+        await _safe_callback_answer(callback)
         uid = int(callback.from_user.id)
         await ctx.repositories.user.upsert_from_telegram(ctx.bot_id, callback.from_user)
         rooms = await ctx.repositories.room.list_for_user(ctx.bot_id, uid, 100)
@@ -185,14 +196,14 @@ def build_router(ctx) -> Router:
 
     @router.callback_query(F.data == "room:create")
     async def create_start(callback: CallbackQuery) -> None:
-        await callback.answer()
+        await _safe_callback_answer(callback)
         uid = int(callback.from_user.id)
         await ctx.repositories.session.set(ctx.bot_id, uid, "room_create_name", {"settings": RoomService.default_settings()})
         await callback.message.answer("<b>➕ Crear sala</b>\n\nEscribe el nombre de la sala (máx. 80 caracteres).\n\n🔐 La plataforma generará automáticamente un código único de <b>7 caracteres</b> para compartir la sala.")
 
     @router.callback_query(F.data == "room:public")
     async def public_rooms(callback: CallbackQuery) -> None:
-        await callback.answer()
+        await _safe_callback_answer(callback)
         rooms = await ctx.repositories.room.list_public(ctx.bot_id, 25)
         if not rooms:
             await callback.message.edit_text("<b>🌎 Salas públicas</b>\n\nTodavía no hay salas activas.", reply_markup=_menu(ctx, int(callback.from_user.id)))
@@ -201,7 +212,7 @@ def build_router(ctx) -> Router:
 
     @router.callback_query(F.data == "room:mine")
     async def my_rooms(callback: CallbackQuery) -> None:
-        await callback.answer()
+        await _safe_callback_answer(callback)
         rooms = await ctx.repositories.room.list_for_user(ctx.bot_id, int(callback.from_user.id), 50)
         if not rooms:
             await callback.message.edit_text("<b>🏠 Mis salas</b>\n\nAún no perteneces a ninguna.", reply_markup=_menu(ctx, int(callback.from_user.id)))
@@ -210,7 +221,7 @@ def build_router(ctx) -> Router:
 
     @router.callback_query(F.data == "room:join")
     async def join_start(callback: CallbackQuery) -> None:
-        await callback.answer()
+        await _safe_callback_answer(callback)
         uid = int(callback.from_user.id)
         await ctx.repositories.session.set(ctx.bot_id, uid, "join_room", {})
         await callback.message.answer("🚪 Envía el ID o código de la sala.")
@@ -218,7 +229,7 @@ def build_router(ctx) -> Router:
     async def show_room(callback: CallbackQuery, room_id: str) -> None:
         room = await ctx.repositories.room.get(ctx.bot_id, room_id)
         if not room:
-            await callback.answer("Sala no encontrada", show_alert=True)
+            await _safe_callback_answer(callback, "Sala no encontrada", show_alert=True)
             return
         uid = int(callback.from_user.id)
         member = await ctx.repositories.room.member(ctx.bot_id, room_id, uid)
@@ -227,12 +238,12 @@ def build_router(ctx) -> Router:
 
     @router.callback_query(F.data.startswith("room:public:"))
     async def public_open(callback: CallbackQuery) -> None:
-        await callback.answer()
+        await _safe_callback_answer(callback)
         await show_room(callback, callback.data.split(":", 2)[2])
 
     @router.callback_query(F.data.startswith("room:mine:"))
     async def mine_open(callback: CallbackQuery) -> None:
-        await callback.answer()
+        await _safe_callback_answer(callback)
         await show_room(callback, callback.data.split(":", 2)[2])
 
     @router.callback_query(F.data.startswith("room:join:"))
@@ -241,7 +252,7 @@ def build_router(ctx) -> Router:
         ok, reason, room = await ctx.services.rooms.join(ctx.bot_id, int(callback.from_user.id), room_id)
         if ok and room:
             await ctx.repositories.session.set(ctx.bot_id, int(callback.from_user.id), "", {"active_room_id": room_id})
-        await callback.answer(reason, show_alert=not ok)
+        await _safe_callback_answer(callback, reason, show_alert=not ok)
         if room:
             await show_room(callback, room_id)
 
@@ -250,17 +261,17 @@ def build_router(ctx) -> Router:
         room_id = callback.data.split(":", 2)[2]
         member = await ctx.repositories.room.member(ctx.bot_id, room_id, int(callback.from_user.id))
         if not member:
-            await callback.answer("No eres miembro.", show_alert=True)
+            await _safe_callback_answer(callback, "No eres miembro.", show_alert=True)
             return
         await ctx.repositories.session.set(ctx.bot_id, int(callback.from_user.id), "", {"active_room_id": room_id})
-        await callback.answer("✅ Sala activa")
+        await _safe_callback_answer(callback, "✅ Sala activa")
         await callback.message.answer("📡 Sala activa. Envía ahora una foto, vídeo, documento, GIF o álbum.")
 
     @router.callback_query(F.data.startswith("room:leave:"))
     async def leave_room(callback: CallbackQuery) -> None:
         room_id = callback.data.split(":", 2)[2]
         ok, reason = await ctx.services.rooms.leave(ctx.bot_id, room_id, int(callback.from_user.id))
-        await callback.answer(reason, show_alert=not ok)
+        await _safe_callback_answer(callback, reason, show_alert=not ok)
         if ok:
             await ctx.repositories.session.clear(ctx.bot_id, int(callback.from_user.id))
             await callback.message.edit_text("🚪 Has salido de la sala.", reply_markup=_menu(ctx, int(callback.from_user.id)))
@@ -269,7 +280,7 @@ def build_router(ctx) -> Router:
     async def room_members(callback: CallbackQuery) -> None:
         room_id = callback.data.split(":", 2)[2]
         if not await ctx.services.rooms.can_manage(ctx.bot_id, room_id, int(callback.from_user.id)):
-            await callback.answer("No autorizado", show_alert=True)
+            await _safe_callback_answer(callback, "No autorizado", show_alert=True)
             return
         members = await ctx.repositories.room.members_for_room(ctx.bot_id, room_id)
         rows = []
@@ -287,11 +298,11 @@ def build_router(ctx) -> Router:
     async def kick_member(callback: CallbackQuery) -> None:
         _, _, room_id, target = callback.data.split(":", 3)
         if not await ctx.services.rooms.can_manage(ctx.bot_id, room_id, int(callback.from_user.id)):
-            await callback.answer("No autorizado", show_alert=True)
+            await _safe_callback_answer(callback, "No autorizado", show_alert=True)
             return
         await ctx.repositories.room.remove_member(ctx.bot_id, room_id, int(target))
         await ctx.repositories.audit.log(ctx.bot_id, int(callback.from_user.id), "ROOM_MEMBER_KICK", target=target, details={"room_id": room_id})
-        await callback.answer("Miembro expulsado")
+        await _safe_callback_answer(callback, "Miembro expulsado")
         members = await ctx.repositories.room.members_for_room(ctx.bot_id, room_id)
         text = "<b>👥 Miembros</b>\n\n"
         rows = []
@@ -308,7 +319,7 @@ def build_router(ctx) -> Router:
     async def room_manage(callback: CallbackQuery) -> None:
         room_id = callback.data.split(":", 2)[2]
         if not await ctx.services.rooms.can_manage(ctx.bot_id, room_id, int(callback.from_user.id)):
-            await callback.answer("No autorizado", show_alert=True)
+            await _safe_callback_answer(callback, "No autorizado", show_alert=True)
             return
         room = await ctx.repositories.room.get(ctx.bot_id, room_id)
         await callback.message.edit_text(
@@ -324,17 +335,17 @@ def build_router(ctx) -> Router:
     async def edit_name_start(callback: CallbackQuery) -> None:
         room_id = callback.data.split(":", 2)[2]
         await ctx.repositories.session.set(ctx.bot_id, int(callback.from_user.id), "edit_name", {"room_id": room_id})
-        await callback.answer()
+        await _safe_callback_answer(callback)
         await callback.message.answer("✏️ Escribe el nuevo nombre.")
 
     @router.callback_query(F.data.startswith("roomedit:never:"))
     async def edit_never(callback: CallbackQuery) -> None:
         room_id = callback.data.split(":", 2)[2]
         if not await ctx.services.rooms.can_manage(ctx.bot_id, room_id, int(callback.from_user.id)):
-            await callback.answer("No autorizado", show_alert=True)
+            await _safe_callback_answer(callback, "No autorizado", show_alert=True)
             return
         await ctx.repositories.room.update(ctx.bot_id, room_id, expires_at=None)
-        await callback.answer("Expiración desactivada")
+        await _safe_callback_answer(callback, "Expiración desactivada")
         await show_room(callback, room_id)
 
     @router.callback_query(F.data == "roomcreate:settings_done")
@@ -343,7 +354,7 @@ def build_router(ctx) -> Router:
         session = await ctx.repositories.session.get(ctx.bot_id, uid)
         data = (session or {}).get("data", {})
         await ctx.repositories.session.set(ctx.bot_id, uid, "room_create_duration", data)
-        await callback.answer()
+        await _safe_callback_answer(callback)
         await callback.message.edit_text("⏳ ¿Cuánto tiempo estará activa la sala?", reply_markup=_duration_keyboard())
 
     @router.callback_query(F.data.startswith("roomcreate:toggle:"))
@@ -357,7 +368,7 @@ def build_router(ctx) -> Router:
         data["settings"] = settings
         await ctx.repositories.session.set(ctx.bot_id, uid, "room_create_settings", data)
         await callback.message.edit_reply_markup(reply_markup=_settings_keyboard(data))
-        await callback.answer("Actualizado")
+        await _safe_callback_answer(callback, "Actualizado")
 
     @router.callback_query(F.data.startswith("roomcreate:visibility:"))
     async def create_visibility(callback: CallbackQuery) -> None:
@@ -367,7 +378,7 @@ def build_router(ctx) -> Router:
         data = dict((session or {}).get("data") or {})
         data["visibility"] = value
         await ctx.repositories.session.set(ctx.bot_id, uid, "room_create_max", data)
-        await callback.answer()
+        await _safe_callback_answer(callback)
         await callback.message.answer("👥 ¿Capacidad máxima? Escribe un número entre 2 y 10000.")
 
     @router.callback_query(F.data.startswith("roomcreate:duration:"))
@@ -385,7 +396,7 @@ def build_router(ctx) -> Router:
             f"👥 {data.get('max_members', 0)} miembros\n"
             f"⏳ {minutes if minutes else 'sin vencimiento'}"
         )
-        await callback.answer()
+        await _safe_callback_answer(callback)
         await callback.message.edit_text(summary, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🚀 Crear", callback_data="roomcreate:confirm"), InlineKeyboardButton(text="✖️ Cancelar", callback_data="roomcreate:cancel")]]))
 
     @router.callback_query(F.data == "roomcreate:confirm")
@@ -394,26 +405,26 @@ def build_router(ctx) -> Router:
         session = await ctx.repositories.session.get(ctx.bot_id, uid)
         data = dict((session or {}).get("data") or {})
         if not data.get("name") or not data.get("visibility"):
-            await callback.answer("La sesión expiró", show_alert=True)
+            await _safe_callback_answer(callback, "La sesión expiró", show_alert=True)
             return
         room = await ctx.services.rooms.create_room(ctx.bot_id, uid, data["name"], data["visibility"], int(data.get("max_members", 2)), data.get("settings") or RoomService.default_settings(), int(data.get("duration_minutes") or 0))
         await ctx.repositories.session.clear(ctx.bot_id, uid)
         await ctx.repositories.session.set(ctx.bot_id, uid, "", {"active_room_id": room["room_id"]})
         await ctx.repositories.audit.log(ctx.bot_id, uid, "ROOM_CREATED", target=room["room_id"], details={"visibility": room["visibility"]})
-        await callback.answer("Sala creada")
+        await _safe_callback_answer(callback, "Sala creada")
         await callback.message.edit_text(_room_text(room), reply_markup=_room_keyboard(ctx, room, True, True))
 
     @router.callback_query(F.data == "roomcreate:cancel")
     async def create_cancel(callback: CallbackQuery) -> None:
         await ctx.repositories.session.clear(ctx.bot_id, int(callback.from_user.id))
-        await callback.answer("Cancelado")
+        await _safe_callback_answer(callback, "Cancelado")
         await callback.message.edit_text("❎ Creación cancelada.", reply_markup=_menu(ctx, int(callback.from_user.id)))
 
     @router.callback_query(F.data == "admin:panel")
     async def admin_panel(callback: CallbackQuery) -> None:
         uid = int(callback.from_user.id)
         if uid not in ctx.settings.admin_ids:
-            await callback.answer("No autorizado", show_alert=True)
+            await _safe_callback_answer(callback, "No autorizado", show_alert=True)
             return
         enabled = await ctx.repositories.admin_feed.is_enabled(ctx.bot_id, uid)
         status = "🟢 ACTIVO" if enabled else ("🟢 ACTIVO (predeterminado)" if ctx.settings.admin_feed_enabled_by_default else "⚪ INACTIVO")
@@ -430,19 +441,19 @@ def build_router(ctx) -> Router:
     @router.callback_query(F.data == "adminfeed:on")
     async def admin_feed_on(callback: CallbackQuery) -> None:
         if int(callback.from_user.id) not in ctx.settings.admin_ids:
-            await callback.answer("No autorizado", show_alert=True)
+            await _safe_callback_answer(callback, "No autorizado", show_alert=True)
             return
         await ctx.repositories.admin_feed.set_enabled(ctx.bot_id, int(callback.from_user.id), True)
-        await callback.answer("Feed activado")
+        await _safe_callback_answer(callback, "Feed activado")
         await admin_panel(callback)
 
     @router.callback_query(F.data == "adminfeed:off")
     async def admin_feed_off(callback: CallbackQuery) -> None:
         if int(callback.from_user.id) not in ctx.settings.admin_ids:
-            await callback.answer("No autorizado", show_alert=True)
+            await _safe_callback_answer(callback, "No autorizado", show_alert=True)
             return
         await ctx.repositories.admin_feed.set_enabled(ctx.bot_id, int(callback.from_user.id), False)
-        await callback.answer("Feed desactivado")
+        await _safe_callback_answer(callback, "Feed desactivado")
         await admin_panel(callback)
 
     @router.message()

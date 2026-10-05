@@ -12,6 +12,17 @@ from app.services.webapp_auth import make_launch_token
 from app.services.token_service import InvalidBotTokenError
 
 
+
+
+async def _safe_callback_answer(callback: CallbackQuery, *args, **kwargs) -> None:
+    """Answer a callback without turning an expired query into a webhook failure."""
+    try:
+        await _safe_callback_answer(callback, *args, **kwargs)
+    except Exception as exc:
+        message = str(exc).lower()
+        if "query is too old" in message or "query id is invalid" in message or "response timeout expired" in message:
+            return
+        raise
 def build_master_router(manager) -> Router:
     router = Router(name="master")
 
@@ -126,12 +137,12 @@ def build_master_router(manager) -> Router:
 
     @router.callback_query(F.data == "master:home")
     async def home(callback: CallbackQuery) -> None:
-        await callback.answer()
+        await _safe_callback_answer(callback)
         await callback.message.edit_text("<b>🚀 MULTIBOT HUB</b>\n\nSelecciona una opción:", reply_markup=menu(int(callback.from_user.id)))
 
     @router.callback_query(F.data == "master:how")
     async def how(callback: CallbackQuery) -> None:
-        await callback.answer()
+        await _safe_callback_answer(callback)
         await callback.message.edit_text(
             "<b>📖 Cómo funciona</b>\n\n"
             "1. Creas tu bot en @BotFather.\n"
@@ -145,7 +156,7 @@ def build_master_router(manager) -> Router:
 
     @router.callback_query(F.data == "master:mine")
     async def mine(callback: CallbackQuery) -> None:
-        await callback.answer()
+        await _safe_callback_answer(callback)
         docs = await manager.repositories.bots.list_for_owner(int(callback.from_user.id))
         if not docs:
             await callback.message.edit_text("<b>🤖 Mis bots</b>\n\nTodavía no tienes bots.", reply_markup=menu(int(callback.from_user.id)))
@@ -157,9 +168,9 @@ def build_master_router(manager) -> Router:
     @router.callback_query(F.data == "master:list")
     async def admin_list(callback: CallbackQuery) -> None:
         if not is_admin(int(callback.from_user.id)):
-            await callback.answer("No autorizado", show_alert=True)
+            await _safe_callback_answer(callback, "No autorizado", show_alert=True)
             return
-        await callback.answer()
+        await _safe_callback_answer(callback)
         docs = await manager.repositories.bots.list_all()
         rows = [[InlineKeyboardButton(text=f"{doc.get('status','?')} · @{doc.get('username') or doc['bot_id']}", callback_data=f"master:botinfo:{doc['bot_id']}")] for doc in docs[:50]]
         rows.append([InlineKeyboardButton(text="➕ Crear bot", callback_data="master:create"), InlineKeyboardButton(text="↩️ Inicio", callback_data="master:home")])
@@ -167,17 +178,17 @@ def build_master_router(manager) -> Router:
 
     @router.callback_query(F.data == "master:create")
     async def create_callback(callback: CallbackQuery) -> None:
-        await callback.answer()
+        await _safe_callback_answer(callback)
         await begin_create(callback.message, int(callback.from_user.id))
 
     @router.callback_query(F.data.startswith("master:botinfo:"))
     async def info_callback(callback: CallbackQuery) -> None:
-        await callback.answer()
+        await _safe_callback_answer(callback)
         await show_info(callback, int(callback.data.split(":")[-1]))
 
     async def admin_action(callback: CallbackQuery, action: str, bot_id: int) -> None:
         if not is_admin(int(callback.from_user.id)):
-            await callback.answer("No autorizado", show_alert=True)
+            await _safe_callback_answer(callback, "No autorizado", show_alert=True)
             return
         try:
             if action == "start":
@@ -189,14 +200,14 @@ def build_master_router(manager) -> Router:
             elif action == "delete":
                 await manager.stop_bot(bot_id)
                 result = await manager.delete_bot(bot_id)
-                await callback.answer(result, show_alert=False)
+                await _safe_callback_answer(callback, result, show_alert=False)
                 await callback.message.edit_text("🗑️ Bot eliminado.", reply_markup=menu(int(callback.from_user.id)))
                 return
             else:
                 raise ValueError("Acción inválida")
-            await callback.answer(result, show_alert=False)
+            await _safe_callback_answer(callback, result, show_alert=False)
         except Exception as exc:
-            await callback.answer(str(exc)[:180], show_alert=True)
+            await _safe_callback_answer(callback, str(exc)[:180], show_alert=True)
         await show_info(callback, bot_id)
 
     @router.callback_query(F.data.startswith("master:start:"))

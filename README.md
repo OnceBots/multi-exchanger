@@ -148,3 +148,7 @@ Consulta `DEPLOY_CLEAN_REBUILD.md` antes de reemplazar el contenido de un reposi
 
 ### Mini App
 The child interface is a Telegram Mini App (Web App): Telegram launches a hosted HTTPS web app inside its client using `WebAppInfo` / `MenuButtonWebApp`. The `/app` endpoint is the Mini App entry point; it is intentionally an HTTPS URL because Telegram Web Apps are web-based UIs rendered inside Telegram.
+## v8 — callback queries tras reinicios
+
+Los `callback_query` de Telegram son efímeros y no deben volver a contestarse después de un reinicio. La plataforma ahora omite esos updates durante el replay y trata los errores de consulta caducada como no fatales.
+
