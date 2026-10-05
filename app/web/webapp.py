@@ -51,3 +51,5 @@ def build_webapp_router(platform) -> APIRouter:
         rooms = await runtime.ctx.repositories.room.list_for_user(bot_id, int(user["id"]), 50)
         public = await runtime.ctx.repositories.room.list_public(bot_id, 50)
         return {"ok": True, "bot_id": bot_id, "user_id": int(user["id"]), "mine": rooms, "public": public}
+
+    return router

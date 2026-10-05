@@ -4,7 +4,7 @@ services:
     env: docker
     plan: starter
     autoDeploy: true
-    healthCheckPath: /health
+    healthCheckPath: /ready
     envVars:
       - key: MASTER_BOT_TOKEN
         sync: false
