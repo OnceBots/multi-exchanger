@@ -6,7 +6,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.core.enums import RoomVisibility
 from app.services.webapp_auth import authenticate_webapp_request
@@ -17,8 +17,9 @@ class CreateBotBody(BaseModel):
 
 
 class CreateRoomBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     name: str = Field(min_length=1, max_length=80)
-    description: str = Field(default="", max_length=500)
     visibility: str = Field(default=RoomVisibility.PUBLIC.value)
     max_members: int = Field(default=100, ge=2, le=10000)
     duration_minutes: int = Field(default=0, ge=0, le=43200)
@@ -103,7 +104,7 @@ def build_webapp_router(platform) -> APIRouter:
         rooms = await runtime.ctx.repositories.room.list_for_user(bot_id, uid, 50)
         public = await runtime.ctx.repositories.room.list_public(bot_id, 50)
         profile = await runtime.ctx.repositories.user.get(bot_id, uid) or {"bot_id": bot_id, "user_id": uid}
-        return {"ok": True, "bot_id": bot_id, "user_id": uid, "auth_source": source, "profile": profile, "mine": rooms, "public": public}
+        return {"ok": True, "bot_id": bot_id, "bot_username": runtime.ctx.bot_username, "user_id": uid, "auth_source": source, "profile": profile, "mine": rooms, "public": public}
 
     @router.get("/api/child/profile")
     async def child_profile(request: Request, bot_id: int):
@@ -127,7 +128,6 @@ def build_webapp_router(platform) -> APIRouter:
             bot_id,
             int(user["id"]),
             body.name,
-            body.description,
             body.visibility,
             body.max_members,
             {
@@ -139,6 +139,10 @@ def build_webapp_router(platform) -> APIRouter:
             },
             body.duration_minutes,
         )
+        room = dict(room)
+        username = (runtime.ctx.bot_username or "").lstrip("@").strip()
+        if username and room.get("invite_code"):
+            room["share_link"] = f"https://t.me/{username}?start=room_{room['invite_code']}"
         return {"ok": True, "room": room}
 
     @router.post("/api/child/rooms/{room_id}/join")

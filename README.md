@@ -4,6 +4,10 @@ Plataforma SaaS de Telegram con **MASTER + bots hijos**, un único servidor HTTP
 
 Este repositorio es un **rebuild limpio**. No es un parche incremental del código anterior. Se conserva la funcionalidad principal solicitada: creación pública de bots hijos, aislamiento por `bot_id`, webhooks, salas, membresías, multimedia, álbumes, colas, reintentos, supervisor, Mini App y administración.
 
+### Salas
+
+Cada sala nueva genera automáticamente un código de acceso de 7 caracteres (letras mayúsculas y números). La plataforma no permite crear ni editar descripciones de salas. Cada sala tiene un enlace de invitación de Telegram con el formato `https://t.me/<bot>?start=room_<CODIGO>` que puede compartirse desde el bot o la Mini App.
+
 ## Arquitectura
 
 ```text

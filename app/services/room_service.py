@@ -7,8 +7,8 @@ class RoomService:
     def __init__(self, repositories) -> None:
         self.repositories = repositories
 
-    async def create_room(self, bot_id: int, owner_id: int, name: str, description: str, visibility: str, max_members: int, settings: dict, duration_minutes: int) -> dict:
-        return await self.repositories.room.create(bot_id, owner_id, name.strip()[:80], description.strip()[:500], visibility, max(2, min(max_members, 10000)), settings, max(0, duration_minutes))
+    async def create_room(self, bot_id: int, owner_id: int, name: str, visibility: str, max_members: int, settings: dict, duration_minutes: int) -> dict:
+        return await self.repositories.room.create(bot_id, owner_id, name.strip()[:80], visibility, max(2, min(max_members, 10000)), settings, max(0, duration_minutes))
 
     async def can_manage(self, bot_id: int, room_id: str, user_id: int) -> bool:
         member = await self.repositories.room.member(bot_id, room_id, user_id)

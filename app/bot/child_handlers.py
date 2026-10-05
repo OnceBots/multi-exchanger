@@ -5,7 +5,7 @@ import html
 from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, WebAppInfo
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 from app.services.webapp_auth import make_launch_token
 
@@ -35,12 +35,24 @@ def _menu(ctx, user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def _room_keyboard(room: dict, member: bool, manageable: bool) -> InlineKeyboardMarkup:
+def _room_share_link(ctx, room: dict) -> str | None:
+    username = (ctx.bot_username or "").lstrip("@").strip()
+    code = str(room.get("invite_code") or "").strip().upper()
+    if not username or len(code) != 7:
+        return None
+    return f"https://t.me/{username}?start=room_{code}"
+
+
+def _room_keyboard(ctx, room: dict, member: bool, manageable: bool) -> InlineKeyboardMarkup:
     rows = []
     if not member:
         rows.append([InlineKeyboardButton(text="➕ Unirme", callback_data=f"room:join:{room['room_id']}")])
     else:
         rows.append([InlineKeyboardButton(text="📤 Publicar multimedia", callback_data=f"room:use:{room['room_id']}"), InlineKeyboardButton(text="🚪 Salir", callback_data=f"room:leave:{room['room_id']}")])
+    share_link = _room_share_link(ctx, room)
+    if share_link:
+        share_url = f"https://t.me/share/url?url={quote(share_link, safe='')}&text={quote('Únete a esta sala', safe='')}"
+        rows.append([InlineKeyboardButton(text="🔗 Compartir enlace", url=share_url)])
     if manageable:
         rows.append([InlineKeyboardButton(text="👥 Miembros", callback_data=f"room:members:{room['room_id']}"), InlineKeyboardButton(text="⚙️ Gestionar", callback_data=f"room:manage:{room['room_id']}")])
     rows.append([InlineKeyboardButton(text="↩️ Menú", callback_data="home")])
@@ -53,11 +65,9 @@ def _room_text(room: dict) -> str:
     expiry_text = expiry.isoformat() if expiry else "Sin vencimiento"
     return (
         f"<b>🏠 {html.escape(str(room.get('name', 'Sala')))}</b>\n\n"
-        f"📝 {html.escape(str(room.get('description') or 'Sin descripción'))}\n"
         f"{visibility}\n"
         f"👥 Miembros: <b>{int(room.get('member_count', 0))}/{int(room.get('max_members', 0))}</b>\n"
-        f"🆔 <code>{room.get('room_id')}</code>\n"
-        f"🔐 Código: <code>{room.get('invite_code')}</code>\n"
+        f"🔐 Código de acceso: <code>{html.escape(str(room.get('invite_code', '')))}</code>\n"
         f"⏳ Expira: <code>{html.escape(str(expiry_text))}</code>\n\n"
         "Los mensajes multimedia publicados en la sala se redistribuyen sin mostrar al remitente a los demás miembros."
     )
@@ -103,6 +113,23 @@ def build_router(ctx) -> Router:
     async def start(message: Message) -> None:
         if message.from_user:
             await ctx.repositories.user.upsert_from_telegram(ctx.bot_id, message.from_user)
+        uid = int(message.from_user.id) if message.from_user else 0
+        parts = (message.text or "").split(maxsplit=1)
+        payload = parts[1].strip() if len(parts) > 1 else ""
+        if payload.startswith("room_") and uid:
+            code = payload[5:].strip().upper()
+            room = await ctx.repositories.room.resolve(ctx.bot_id, code)
+            if not room:
+                await message.answer("❌ El enlace de la sala no es válido o la sala ya no está disponible.", reply_markup=_menu(ctx, uid))
+                return
+            ok, reason = await ctx.repositories.room.join(ctx.bot_id, room["room_id"], uid)
+            if ok:
+                await ctx.repositories.session.set(ctx.bot_id, uid, "", {"active_room_id": room["room_id"]})
+                room = await ctx.repositories.room.get(ctx.bot_id, room["room_id"]) or room
+                await message.answer(f"✅ {reason}\n\n" + _room_text(room), reply_markup=_room_keyboard(ctx, room, True, bool(int(room.get("owner_id", 0)) == uid)))
+            else:
+                await message.answer(f"❌ {reason}", reply_markup=_menu(ctx, uid))
+            return
         text = (
             f"<b>🎬 @{html.escape(ctx.bot_username or str(ctx.bot_id))}</b>\n\n"
             "Una plataforma de salas para compartir fotos, vídeos, archivos, GIF y álbumes.\n\n"
@@ -161,7 +188,7 @@ def build_router(ctx) -> Router:
         await callback.answer()
         uid = int(callback.from_user.id)
         await ctx.repositories.session.set(ctx.bot_id, uid, "room_create_name", {"settings": RoomService.default_settings()})
-        await callback.message.answer("<b>➕ Crear sala</b>\n\nEscribe el nombre de la sala (máx. 80 caracteres).")
+        await callback.message.answer("<b>➕ Crear sala</b>\n\nEscribe el nombre de la sala (máx. 80 caracteres).\n\n🔐 La plataforma generará automáticamente un código único de <b>7 caracteres</b> para compartir la sala.")
 
     @router.callback_query(F.data == "room:public")
     async def public_rooms(callback: CallbackQuery) -> None:
@@ -196,7 +223,7 @@ def build_router(ctx) -> Router:
         uid = int(callback.from_user.id)
         member = await ctx.repositories.room.member(ctx.bot_id, room_id, uid)
         manageable = bool(member and member.get("role") in {MemberRole.OWNER.value, MemberRole.ADMIN.value})
-        await callback.message.edit_text(_room_text(room), reply_markup=_room_keyboard(room, bool(member), manageable))
+        await callback.message.edit_text(_room_text(room), reply_markup=_room_keyboard(ctx, room, bool(member), manageable))
 
     @router.callback_query(F.data.startswith("room:public:"))
     async def public_open(callback: CallbackQuery) -> None:
@@ -287,7 +314,7 @@ def build_router(ctx) -> Router:
         await callback.message.edit_text(
             _room_text(room or {}) + "\n\n<b>⚙️ Gestión</b>",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="✏️ Cambiar nombre", callback_data=f"roomedit:name:{room_id}"), InlineKeyboardButton(text="📝 Descripción", callback_data=f"roomedit:desc:{room_id}")],
+                [InlineKeyboardButton(text="✏️ Cambiar nombre", callback_data=f"roomedit:name:{room_id}")],
                 [InlineKeyboardButton(text="⏳ Sin vencimiento", callback_data=f"roomedit:never:{room_id}")],
                 [InlineKeyboardButton(text="↩️ Sala", callback_data=f"room:public:{room_id}")],
             ]),
@@ -299,13 +326,6 @@ def build_router(ctx) -> Router:
         await ctx.repositories.session.set(ctx.bot_id, int(callback.from_user.id), "edit_name", {"room_id": room_id})
         await callback.answer()
         await callback.message.answer("✏️ Escribe el nuevo nombre.")
-
-    @router.callback_query(F.data.startswith("roomedit:desc:"))
-    async def edit_desc_start(callback: CallbackQuery) -> None:
-        room_id = callback.data.split(":", 2)[2]
-        await ctx.repositories.session.set(ctx.bot_id, int(callback.from_user.id), "edit_desc", {"room_id": room_id})
-        await callback.answer()
-        await callback.message.answer("📝 Escribe la nueva descripción.")
 
     @router.callback_query(F.data.startswith("roomedit:never:"))
     async def edit_never(callback: CallbackQuery) -> None:
@@ -376,12 +396,12 @@ def build_router(ctx) -> Router:
         if not data.get("name") or not data.get("visibility"):
             await callback.answer("La sesión expiró", show_alert=True)
             return
-        room = await ctx.services.rooms.create_room(ctx.bot_id, uid, data["name"], data.get("description", ""), data["visibility"], int(data.get("max_members", 2)), data.get("settings") or RoomService.default_settings(), int(data.get("duration_minutes") or 0))
+        room = await ctx.services.rooms.create_room(ctx.bot_id, uid, data["name"], data["visibility"], int(data.get("max_members", 2)), data.get("settings") or RoomService.default_settings(), int(data.get("duration_minutes") or 0))
         await ctx.repositories.session.clear(ctx.bot_id, uid)
         await ctx.repositories.session.set(ctx.bot_id, uid, "", {"active_room_id": room["room_id"]})
         await ctx.repositories.audit.log(ctx.bot_id, uid, "ROOM_CREATED", target=room["room_id"], details={"visibility": room["visibility"]})
         await callback.answer("Sala creada")
-        await callback.message.edit_text(_room_text(room), reply_markup=_room_keyboard(room, True, True))
+        await callback.message.edit_text(_room_text(room), reply_markup=_room_keyboard(ctx, room, True, True))
 
     @router.callback_query(F.data == "roomcreate:cancel")
     async def create_cancel(callback: CallbackQuery) -> None:
@@ -440,17 +460,16 @@ def build_router(ctx) -> Router:
                 ok, reason, room = await ctx.services.rooms.join(ctx.bot_id, uid, message.text.strip())
                 if ok and room:
                     await ctx.repositories.session.set(ctx.bot_id, uid, "", {"active_room_id": room["room_id"]})
-                    await message.answer("✅ " + reason, reply_markup=_room_keyboard(room, True, False))
+                    await message.answer("✅ " + reason, reply_markup=_room_keyboard(ctx, room, True, False))
                 else:
                     await message.answer("❌ " + reason, reply_markup=_menu(ctx, uid))
                 return
             if step == "room_create_name":
-                data["name"] = message.text.strip()[:80]
-                await ctx.repositories.session.set(ctx.bot_id, uid, "room_create_description", data)
-                await message.answer("📝 Escribe una descripción o <code>-</code> para omitir.")
-                return
-            if step == "room_create_description":
-                data["description"] = "" if message.text.strip() == "-" else message.text.strip()[:500]
+                name = message.text.strip()
+                if not name:
+                    await message.answer("❌ El nombre no puede estar vacío.")
+                    return
+                data["name"] = name[:80]
                 await ctx.repositories.session.set(ctx.bot_id, uid, "room_create_visibility", data)
                 await message.answer("🌐 Visibilidad:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🌎 Pública", callback_data="roomcreate:visibility:PUBLIC"), InlineKeyboardButton(text="🔒 Privada", callback_data="roomcreate:visibility:PRIVATE")]]))
                 return
@@ -472,13 +491,6 @@ def build_router(ctx) -> Router:
                     await ctx.repositories.room.update(ctx.bot_id, room_id, name=message.text.strip()[:80])
                 await ctx.repositories.session.clear(ctx.bot_id, uid)
                 await message.answer("✅ Nombre actualizado.", reply_markup=_menu(ctx, uid))
-                return
-            if step == "edit_desc":
-                room_id = data.get("room_id")
-                if room_id and await ctx.services.rooms.can_manage(ctx.bot_id, room_id, uid):
-                    await ctx.repositories.room.update(ctx.bot_id, room_id, description=message.text.strip()[:500])
-                await ctx.repositories.session.clear(ctx.bot_id, uid)
-                await message.answer("✅ Descripción actualizada.", reply_markup=_menu(ctx, uid))
                 return
         if message.photo or message.video or message.document or message.animation:
             await ctx.services.media.handle_message(message)

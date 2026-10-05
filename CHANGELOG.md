@@ -1,3 +1,12 @@
+
+## v7 — room access code and sharing
+
+- New rooms receive a unique 7-character uppercase alphanumeric access code.
+- Room descriptions are no longer supported in the bot flow or Mini App.
+- Added shareable Telegram deep links: `https://t.me/<bot>?start=room_<CODE>`.
+- Opening a room invite link resolves the 7-character code and joins the user to the room.
+- Added share buttons to bot room cards and the Mini App.
+- Existing room records remain compatible; legacy description fields are ignored by updates and are no longer rendered.
 # Changelog
 
 ## v5 — lifecycle + Mini App hardening

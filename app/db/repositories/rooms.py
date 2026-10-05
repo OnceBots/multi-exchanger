@@ -13,24 +13,32 @@ class RoomRepository:
         self.members = mongo.collection("room_members")
 
     def _code(self) -> str:
+        """Generate a human-shareable 7-character alphanumeric room code."""
         alphabet = string.ascii_uppercase + string.digits
-        return "".join(secrets.choice(alphabet) for _ in range(8))
+        return "".join(secrets.choice(alphabet) for _ in range(7))
 
-    async def create(self, bot_id: int, owner_id: int, name: str, description: str, visibility: str, max_members: int, settings: dict, duration_minutes: int) -> dict:
+    async def create(self, bot_id: int, owner_id: int, name: str, visibility: str, max_members: int, settings: dict, duration_minutes: int) -> dict:
         created = utcnow()
         expires_at = None
         if duration_minutes > 0:
             from datetime import timedelta
             expires_at = created + timedelta(minutes=duration_minutes)
+        # Keep an internal opaque room id separate from the user-facing 7-char code.
         room_id = secrets.token_hex(8)
         invite_code = self._code()
+        for _ in range(8):
+            existing = await self.rooms.find_one({"bot_id": bot_id, "invite_code": invite_code}, {"_id": 1})
+            if not existing:
+                break
+            invite_code = self._code()
+        else:
+            raise RuntimeError("No se pudo generar un código único para la sala.")
         room = {
             "bot_id": bot_id,
             "room_id": room_id,
             "invite_code": invite_code,
             "owner_id": owner_id,
             "name": name,
-            "description": description,
             "visibility": visibility,
             "max_members": max_members,
             "settings": settings,
@@ -122,8 +130,8 @@ class RoomRepository:
             await self.rooms.update_one({"bot_id": bot_id, "room_id": room_id}, {"$inc": {"member_count": -1}, "$set": {"updated_at": utcnow()}})
 
     async def update(self, bot_id: int, room_id: str, **fields) -> None:
-        if "expires_at" in fields or "name" in fields or "description" in fields:
-            pass
+        # Descriptions are intentionally unsupported by the product.
+        fields.pop("description", None)
         fields["updated_at"] = utcnow()
         await self.rooms.update_one({"bot_id": bot_id, "room_id": room_id}, {"$set": fields})
 
