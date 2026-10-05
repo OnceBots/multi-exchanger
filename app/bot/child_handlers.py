@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 import html
 
 from aiogram import F, Router
@@ -25,13 +26,23 @@ async def _safe_callback_answer(callback: CallbackQuery, *args, **kwargs) -> Non
             return
         raise
 def _webapp_url(ctx, user_id: int) -> str:
+    # Match the proven Mini App launch pattern used by aprovebot.py:
+    # identify the child/user in the query string and keep a signed token as
+    # the authenticated fallback when Telegram does not expose initData.
+    token = make_launch_token(
+        ctx.settings.webhook_secret,
+        ctx.bot_id,
+        user_id,
+        ctx.settings.webapp_launch_ttl_seconds,
+    )
     params = {
+        "bot": ctx.bot_username or str(ctx.bot_id),
         "bot_id": str(ctx.bot_id),
-        "launch": make_launch_token(ctx.settings.webhook_secret, ctx.bot_id, user_id, ctx.settings.webapp_launch_ttl_seconds),
+        "user_id": str(user_id),
+        "v": str(int(time.time())),
+        "launch": token,
     }
-    base = f"{ctx.settings.app_base_url}/app?bot_id={ctx.bot_id}"
-    token = params["launch"]
-    return f"{base}#launch={urlencode({'launch': token})[7:]}"
+    return f"{ctx.settings.app_base_url}/app?{urlencode(params)}"
 
 
 async def _configure_user_miniapp_menu(ctx, user_id: int) -> None:

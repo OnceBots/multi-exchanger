@@ -1,3 +1,11 @@
+## v10 - Mini App compatibility with proven launcher
+
+- Child and Master Mini App URLs now follow the working `aprovebot.py` pattern: `bot`, `bot_id`, `user_id`, `v` and a short-lived signed launch token in the query string.
+- Removed reliance on URL fragments for the primary launch path.
+- Telegram `initData` remains the preferred authentication source; the signed launch token is the fallback.
+- Fixed a recursive Master callback answer helper that could prevent Master buttons from responding.
+- Kept room codes, share links and no-name/no-description room creation unchanged.
+
 # v9 — Child UX, room identity and Mini App connection
 
 - Fixed recursive callback acknowledgement that made child inline buttons appear unresponsive.

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 import html
 
 from aiogram import F, Router
@@ -17,7 +18,7 @@ from app.services.token_service import InvalidBotTokenError
 async def _safe_callback_answer(callback: CallbackQuery, *args, **kwargs) -> None:
     """Answer a callback without turning an expired query into a webhook failure."""
     try:
-        await _safe_callback_answer(callback, *args, **kwargs)
+        await callback.answer(*args, **kwargs)
     except Exception as exc:
         message = str(exc).lower()
         if "query is too old" in message or "query id is invalid" in message or "response timeout expired" in message:
@@ -30,11 +31,18 @@ def build_master_router(manager) -> Router:
         return user_id in manager.settings.admin_ids
 
     def master_app_url(user_id: int) -> str:
+        token = make_launch_token(
+            manager.settings.webhook_secret,
+            0,
+            user_id,
+            manager.settings.webapp_launch_ttl_seconds,
+        )
         params = {
-            "launch": make_launch_token(manager.settings.webhook_secret, 0, user_id, manager.settings.webapp_launch_ttl_seconds),
+            "user_id": str(user_id),
+            "v": str(int(time.time())),
+            "launch": token,
         }
-        token = params["launch"]
-        return f"{manager.settings.app_base_url}/master-app#launch={urlencode({'launch': token})[7:]}"
+        return f"{manager.settings.app_base_url}/master-app?{urlencode(params)}"
 
     def menu(user_id: int) -> InlineKeyboardMarkup:
         rows = [
