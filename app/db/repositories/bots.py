@@ -37,6 +37,12 @@ class BotRepository:
         now = datetime.now(timezone.utc)
         await self.col.update_one({"bot_id": bot_id}, {"$set": {"last_heartbeat": now, "updated_at": now}})
 
+    async def update_config(self, bot_id: int, config_updates: dict) -> None:
+        now = datetime.now(timezone.utc)
+        fields = {f"config.{key}": value for key, value in config_updates.items()}
+        fields["updated_at"] = now
+        await self.col.update_one({"bot_id": bot_id}, {"$set": fields})
+
     async def set_enabled(self, bot_id: int, enabled: bool) -> None:
         await self.col.update_one({"bot_id": bot_id}, {"$set": {"enabled": enabled, "updated_at": datetime.now(timezone.utc)}})
 

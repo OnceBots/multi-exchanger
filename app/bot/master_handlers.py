@@ -6,7 +6,7 @@ import html
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, WebAppInfo
 
 
 def build_master_router(manager) -> Router:
@@ -15,21 +15,27 @@ def build_master_router(manager) -> Router:
     def is_admin(message: Message) -> bool:
         return bool(message.from_user and int(message.from_user.id) in manager.settings.admin_ids)
 
+    def create_webapp_button() -> InlineKeyboardButton:
+        return InlineKeyboardButton(text="➕ Crear mi bot", web_app=WebAppInfo(url=f"{manager.settings.app_base_url.rstrip('/')}/master-app"))
+
     def master_public_kb() -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="➕ Crear mi bot", callback_data="master:create")],
+            [create_webapp_button()],
             [InlineKeyboardButton(text="🤖 Mis bots", callback_data="master:mine"), InlineKeyboardButton(text="📖 Cómo funciona", callback_data="master:how")],
         ])
 
     def admin_kb() -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🤖 Gestionar bots", callback_data="master:list"), InlineKeyboardButton(text="➕ Crear bot", callback_data="master:create")],
+            [InlineKeyboardButton(text="🤖 Gestionar bots", callback_data="master:list"), create_webapp_button()],
             [InlineKeyboardButton(text="❤️ Salud", callback_data="master:health"), InlineKeyboardButton(text="📊 Estadísticas", callback_data="master:stats")],
             [InlineKeyboardButton(text="📖 Guía", callback_data="master:how")],
         ])
 
-    async def begin_create(message: Message) -> None:
-        await manager.repositories.session.set(0, int(message.from_user.id), "master_token", {})
+    async def begin_create(message: Message, user_id: int | None = None) -> None:
+        # callback.message.from_user es el bot, no el usuario que pulsó el botón.
+        # Por eso el owner de la sesión debe venir explícitamente del actor.
+        actor_id = int(user_id if user_id is not None else message.from_user.id)
+        await manager.repositories.session.set(0, actor_id, "master_token", {})
         await message.answer(
             "<b>➕ CREAR BOT HIJO</b>\n"
             "<i>Configuración rápida y segura</i>\n\n"
@@ -101,7 +107,7 @@ def build_master_router(manager) -> Router:
             status = {"RUNNING": "🟢", "STARTING": "🟡", "RESTARTING": "🟠", "ERROR": "🔴", "STOPPED": "⚫", "DISABLED": "🔵"}.get(doc.get("status"), "⚪")
             label = f"{status} @{doc.get('username') or doc['bot_id']}"
             rows.append([InlineKeyboardButton(text=label[:40], callback_data=f"master:botinfo:{doc['bot_id']}")])
-        rows.append([InlineKeyboardButton(text="➕ Crear bot", callback_data="master:create")])
+        rows.append([create_webapp_button()])
         rows.append([InlineKeyboardButton(text="↩️ Inicio", callback_data="master:home")])
         await target.answer(f"<b>{'🤖 Mis bots' if owner_view else '🤖 Todos los bots'}</b>\n\nSelecciona un bot:", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
@@ -175,7 +181,7 @@ def build_master_router(manager) -> Router:
     @router.callback_query(F.data == "master:create")
     async def create_callback(callback: CallbackQuery) -> None:
         await callback.answer()
-        await begin_create(callback.message)
+        await begin_create(callback.message, int(callback.from_user.id))
 
     @router.callback_query(F.data == "master:home")
     async def home_callback(callback: CallbackQuery) -> None:
@@ -189,7 +195,7 @@ def build_master_router(manager) -> Router:
     async def mine_callback(callback: CallbackQuery) -> None:
         docs = await manager.repositories.bots.list_for_owner(int(callback.from_user.id))
         await callback.answer()
-        await callback.message.edit_text("<b>🤖 Mis bots</b>\n\nSelecciona un bot:" if docs else "🤖 Todavía no tienes bots.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"{'🟢' if d.get('status') == 'RUNNING' else '⚪'} @{d.get('username') or d['bot_id']}", callback_data=f"master:botinfo:{d['bot_id']}")] for d in docs[:20]] + [[InlineKeyboardButton(text="➕ Crear bot", callback_data="master:create")], [InlineKeyboardButton(text="↩️ Inicio", callback_data="master:home")]]))
+        await callback.message.edit_text("<b>🤖 Mis bots</b>\n\nSelecciona un bot:" if docs else "🤖 Todavía no tienes bots.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"{'🟢' if d.get('status') == 'RUNNING' else '⚪'} @{d.get('username') or d['bot_id']}", callback_data=f"master:botinfo:{d['bot_id']}")] for d in docs[:20]] + [[create_webapp_button()], [InlineKeyboardButton(text="↩️ Inicio", callback_data="master:home")]]))
 
     @router.callback_query(F.data == "master:list")
     async def list_callback(callback: CallbackQuery) -> None:
@@ -200,7 +206,7 @@ def build_master_router(manager) -> Router:
         if not docs:
             await callback.message.edit_text("<b>🤖 Todos los bots</b>\n\nNo hay bots registrados.", reply_markup=admin_kb()); return
         rows = [[InlineKeyboardButton(text=f"{'🟢' if d.get('status') == 'RUNNING' else '🔴' if d.get('status') == 'ERROR' else '⚪'} @{d.get('username') or d['bot_id']}", callback_data=f"master:botinfo:{d['bot_id']}")] for d in docs[:30]]
-        rows.append([InlineKeyboardButton(text="➕ Crear bot", callback_data="master:create"), InlineKeyboardButton(text="↩️ Inicio", callback_data="master:home")])
+        rows.append([create_webapp_button(), InlineKeyboardButton(text="↩️ Inicio", callback_data="master:home")])
         await callback.message.edit_text("<b>🤖 Todos los bots</b>\n\nSelecciona un bot:", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
     @router.callback_query(F.data.startswith("master:botinfo:"))
@@ -326,7 +332,7 @@ def build_master_router(manager) -> Router:
                 reply_markup=InlineKeyboardMarkup(
                     inline_keyboard=[
                         ([InlineKeyboardButton(text="🤖 Abrir mi bot", url=f"https://t.me/{info.username}")] if info.username else []),
-                        [InlineKeyboardButton(text="➕ Crear otro bot", callback_data="master:create")],
+                        [create_webapp_button()],
                         [InlineKeyboardButton(text="↩️ Volver al inicio", callback_data="master:home")],
                     ]
                 ),
@@ -345,7 +351,7 @@ def build_master_router(manager) -> Router:
                 "Verifica que el token sea correcto y vuelve a intentarlo.",
                 reply_markup=InlineKeyboardMarkup(
                     inline_keyboard=[
-                        [InlineKeyboardButton(text="🔁 Intentar de nuevo", callback_data="master:create")],
+                        [create_webapp_button()],
                         [InlineKeyboardButton(text="↩️ Inicio", callback_data="master:home")],
                     ]
                 ),

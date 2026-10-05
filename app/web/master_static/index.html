@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#0d1726">
+  <title>Crear bot</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <link rel="stylesheet" href="/app/static/master-create.css">
+</head>
+<body>
+  <main class="sheet">
+    <section id="formView" class="card">
+      <button class="close" id="closeBtn" aria-label="Cerrar">×</button>
+      <div class="logo">M</div>
+      <h1>Crear bot</h1>
+      <p class="lead">Crea y administra un bot hijo desde el Master.</p>
+
+      <label class="field">
+        <span>Nombre del bot</span>
+        <input id="botName" maxlength="80" placeholder="Ej. Solicitudes de unión" autocomplete="off">
+      </label>
+
+      <label class="field">
+        <span>Nombre de usuario del bot o URL</span>
+        <input id="botUsername" maxlength="160" placeholder="@mi_bot o https://t.me/mi_bot" autocomplete="off">
+        <small id="preview">Enlace: —</small>
+      </label>
+
+      <label class="field token-field">
+        <span>Token de BotFather</span>
+        <div class="token-wrap">
+          <input id="botToken" type="password" maxlength="256" placeholder="123456789:AA..." autocomplete="off" spellcheck="false">
+          <button type="button" id="showToken">Mostrar</button>
+        </div>
+      </label>
+
+      <div class="note">
+        <b>🔐 Token privado</b>
+        <span>Se valida directamente con Telegram y se almacena cifrado. Nunca se muestra al resto de usuarios.</span>
+      </div>
+
+      <button class="create" id="createBtn">Crear</button>
+      <button class="cancel" id="cancelBtn">Cancelar</button>
+      <div id="error" class="error hidden"></div>
+    </section>
+
+    <section id="progressView" class="card center hidden">
+      <div class="loader"></div>
+      <h2>Validando bot…</h2>
+      <p>Estamos comprobando el token con Telegram y preparando el bot hijo.</p>
+    </section>
+
+    <section id="successView" class="card center hidden">
+      <div class="success-icon">✓</div>
+      <div class="eyebrow">BOT LISTO</div>
+      <h2 id="successTitle">Bot creado</h2>
+      <p id="successMeta"></p>
+      <a id="openBot" class="create link" href="#">Abrir bot</a>
+      <button class="cancel" id="doneBtn">Cerrar</button>
+    </section>
+  </main>
+
+  <script>
+    const tg = window.Telegram?.WebApp;
+    if (tg) {
+      tg.ready();
+      tg.expand();
+      tg.enableClosingConfirmation?.();
+    }
+
+    const $ = (id) => document.getElementById(id);
+    const formView = $('formView');
+    const progressView = $('progressView');
+    const successView = $('successView');
+
+    function setView(view) {
+      [formView, progressView, successView].forEach(v => v.classList.add('hidden'));
+      view.classList.remove('hidden');
+    }
+
+    function showError(message) {
+      const el = $('error');
+      el.textContent = message;
+      el.classList.remove('hidden');
+    }
+
+    function normalizeUsername(value) {
+      let v = value.trim();
+      if (v.startsWith('https://t.me/')) v = '@' + v.split('/').pop().replace(/\/$/, '');
+      if (v && !v.startsWith('@')) v = '@' + v;
+      return v;
+    }
+
+    function updatePreview() {
+      const value = normalizeUsername($('botUsername').value);
+      $('preview').textContent = value && value !== '@' ? `Enlace: https://t.me/${value.replace(/^@/, '')}` : 'Enlace: —';
+    }
+
+    $('botUsername').addEventListener('input', updatePreview);
+    $('showToken').addEventListener('click', () => {
+      const input = $('botToken');
+      input.type = input.type === 'password' ? 'text' : 'password';
+      $('showToken').textContent = input.type === 'password' ? 'Mostrar' : 'Ocultar';
+    });
+
+    async function createBot() {
+      $('error').classList.add('hidden');
+      const name = $('botName').value.trim();
+      const username = normalizeUsername($('botUsername').value);
+      const token = $('botToken').value.trim();
+      if (!name) return showError('Escribe un nombre para el bot.');
+      if (!token || !token.includes(':')) return showError('Pega un token válido de @BotFather.');
+      if (!tg?.initData) return showError('Abre esta ventana desde el bot Master de Telegram.');
+
+      setView(progressView);
+      try {
+        const response = await fetch('/api/master/create-bot', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Telegram-Init-Data': tg.initData,
+          },
+          body: JSON.stringify({ name, username_or_url: username, token }),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || !data.ok) throw new Error(data.detail || 'No se pudo crear el bot.');
+        const bot = data.bot;
+        $('successTitle').textContent = `@${bot.username || bot.bot_id}`;
+        $('successMeta').textContent = `🟢 Activo · ID ${bot.bot_id}`;
+        const open = $('openBot');
+        if (bot.url) { open.href = bot.url; open.style.display = 'block'; }
+        else open.style.display = 'none';
+        setView(successView);
+        tg.HapticFeedback?.notificationOccurred('success');
+      } catch (error) {
+        setView(formView);
+        showError(error.message || 'No se pudo crear el bot.');
+        tg.HapticFeedback?.notificationOccurred('error');
+      }
+    }
+
+    $('createBtn').addEventListener('click', createBot);
+    $('closeBtn').addEventListener('click', () => tg?.close());
+    $('cancelBtn').addEventListener('click', () => tg?.close());
+    $('doneBtn').addEventListener('click', () => tg?.close());
+  </script>
+</body>
+</html>

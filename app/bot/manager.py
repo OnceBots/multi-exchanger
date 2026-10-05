@@ -144,7 +144,7 @@ class BotManager:
         self.supervisor_task = asyncio.create_task(self._supervisor_loop())
         self.room_cleanup_task = asyncio.create_task(self._room_cleanup_loop())
 
-    async def register_bot(self, token: str, owner_id: int) -> BotInfo:
+    async def register_bot(self, token: str, owner_id: int, metadata: dict | None = None) -> BotInfo:
         async with self.lock:
             bot_id, username = await self.token_service.validate_token(token)
             if await self.repositories.bots.get(bot_id):
@@ -158,7 +158,7 @@ class BotManager:
                 "webhook_secret_encrypted": self.token_service.encrypt(secret),
                 "enabled": True,
                 "status": BotStatus.CREATED.value,
-                "config": {"features": {"media": True, "rooms": True, "webapp": True, "admin_feed": True}, "language": "es", "max_members_default": 100},
+                "config": {"features": {"media": True, "rooms": True, "webapp": True, "admin_feed": True}, "language": "es", "max_members_default": 100, **(metadata or {})},
                 "restart_count": 0,
                 "last_error": None,
                 "created_at": datetime.utcnow(),

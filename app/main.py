@@ -17,6 +17,7 @@ from app.bot.manager import BotManager
 from app.web.routes import build_router
 from app.web.webhook import build_webhook_router
 from app.web.app import WebAppAPI
+from app.web.master_app import MasterWebAppAPI
 
 
 class Platform:
@@ -78,6 +79,7 @@ def create_app() -> FastAPI:
         return HTMLResponse(path.read_text(encoding="utf-8"))
 
     app.mount("/app/static", StaticFiles(directory=str(Path(__file__).resolve().parent / "webapp" / "static")), name="webapp-static")
+    app.include_router(_late_router(lambda p: MasterWebAppAPI(p).router(), platform))
 
     # Routers are bound to the initialized Platform at request time.
     app.include_router(_late_router(build_router, platform))
