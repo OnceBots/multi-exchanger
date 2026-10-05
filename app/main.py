@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -17,7 +16,7 @@ from app.bot.manager import BotManager
 from app.web.routes import build_router
 from app.web.webhook import build_webhook_router
 from app.web.app import WebAppAPI
-from app.web.master_app import MasterWebAppAPI
+from app.web.master_app import build_master_app_router
 
 
 class Platform:
@@ -28,28 +27,14 @@ class Platform:
         self.logger = logging.getLogger("platform")
 
     async def startup(self) -> None:
-        try:
-            await self.mongo.connect()
-            await ensure_indexes(self.mongo)
-            self.manager = BotManager(self.settings, self.mongo, SecretBox(self.settings.token_encryption_key))
-            await self.manager.start_master()
-            await self.manager.bootstrap_children()
-            if self.settings.mode == "webhook":
-                self.webhook_reconcile_task = asyncio.create_task(
-                    self.manager.master_webhook_reconcile_loop(),
-                    name="master-webhook-reconcile",
-                )
-                self.logger.info("webhook_reconcile_scheduled delay=8s interval=30s")
-            self.logger.info("platform_ready")
-        except BaseException:
-            self.logger.exception("platform_startup_failed")
-            await self.shutdown()
-            raise
+        await self.mongo.connect()
+        await ensure_indexes(self.mongo)
+        self.manager = BotManager(self.settings, self.mongo, SecretBox(self.settings.token_encryption_key))
+        await self.manager.start_master()
+        await self.manager.bootstrap_children()
+        self.logger.info("platform_ready")
 
     async def shutdown(self) -> None:
-        if hasattr(self, "webhook_reconcile_task"):
-            self.webhook_reconcile_task.cancel()
-            await asyncio.gather(self.webhook_reconcile_task, return_exceptions=True)
         if self.manager:
             await self.manager.shutdown()
         await self.mongo.close()
@@ -79,12 +64,12 @@ def create_app() -> FastAPI:
         return HTMLResponse(path.read_text(encoding="utf-8"))
 
     app.mount("/app/static", StaticFiles(directory=str(Path(__file__).resolve().parent / "webapp" / "static")), name="webapp-static")
-    app.include_router(_late_router(lambda p: MasterWebAppAPI(p).router(), platform))
 
     # Routers are bound to the initialized Platform at request time.
     app.include_router(_late_router(build_router, platform))
     app.include_router(_late_router(build_webhook_router, platform))
     app.include_router(_late_router(lambda p: WebAppAPI(p).router(), platform))
+    app.include_router(_late_router(build_master_app_router, platform))
     return app
 
 

@@ -7,13 +7,9 @@ from fastapi.responses import PlainTextResponse
 def build_router(platform) -> APIRouter:
     router = APIRouter()
 
-    @router.api_route("/", methods=["GET", "HEAD"])
+    @router.get("/")
     async def root():
         return {"service": platform.settings.service_name, "status": "ok", "environment": platform.settings.environment}
-
-    @router.head("/")
-    async def root_head():
-        return PlainTextResponse("")
 
     @router.get(platform.settings.health_path)
     async def health():

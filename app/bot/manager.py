@@ -19,6 +19,7 @@ from app.core.exceptions import BotAlreadyRunningError, BotNotFoundError
 from app.core.models import BotConfig, BotInfo
 from app.core.task_registry import TaskRegistry
 from app.services.token_service import TokenService
+from app.services.child_bot_provisioner import ChildBotProvisioner
 from app.services.webapp_auth import validate_init_data
 from app.utils.backoff import backoff_delay
 
@@ -51,6 +52,7 @@ class BotManager:
         self.mongo = mongo
         self.repositories = RepositoryBundle(mongo)
         self.token_service = TokenService(secret_box, settings.child_webhook_secret_length)
+        self.provisioner = ChildBotProvisioner(self)
         self.registry: BotRegistry = BotRegistry()
         self.logger = logging.getLogger("bot.manager")
         self.lock = asyncio.Lock()
@@ -68,74 +70,13 @@ class BotManager:
         self.master_dp.include_router(build_master_router(self))
         if self.settings.mode == "webhook":
             url = self.settings.webhook_base_url + self.settings.master_webhook_path
-            allowed_updates = ["message", "callback_query"]
-            await self.master_bot.set_webhook(
-                url=url,
-                secret_token=self.settings.webhook_secret,
-                allowed_updates=allowed_updates,
-                max_connections=self.settings.telegram_max_connections,
-                drop_pending_updates=self.settings.drop_pending_updates,
-            )
+            await self.master_bot.set_webhook(url=url, secret_token=self.settings.webhook_secret, allowed_updates=self.master_dp.resolve_used_update_types(), max_connections=self.settings.telegram_max_connections, drop_pending_updates=self.settings.drop_pending_updates)
             info = await self.master_bot.get_webhook_info()
             if info.url != url:
                 raise RuntimeError("El webhook del Master no coincide con la configuración")
-            self.logger.info(
-                "master_webhook_ready url=%s pending=%s allowed=%s last_error=%s",
-                info.url,
-                info.pending_update_count,
-                info.allowed_updates,
-                info.last_error_message,
-            )
+            self.logger.info("master_webhook_ready pending=%s", info.pending_update_count)
         else:
             self.master_dp_task = asyncio.create_task(self.master_dp.start_polling(self.master_bot, handle_signals=False))
-
-    async def reconcile_master_webhook(self, reason: str = "manual") -> None:
-        if self.settings.mode != "webhook" or self.shutting_down:
-            return
-        url = self.settings.webhook_base_url + self.settings.master_webhook_path
-        allowed_updates = ["message", "callback_query"]
-        try:
-            info = await self.master_bot.get_webhook_info()
-            needs_repair = (
-                info.url != url
-                or list(info.allowed_updates or []) != allowed_updates
-                or bool(info.last_error_message)
-            )
-            if needs_repair:
-                self.logger.warning(
-                    "master_webhook_repair reason=%s url_ok=%s allowed_ok=%s last_error=%s pending=%s",
-                    reason,
-                    info.url == url,
-                    list(info.allowed_updates or []) == allowed_updates,
-                    info.last_error_message,
-                    info.pending_update_count,
-                )
-                await self.master_bot.set_webhook(
-                    url=url,
-                    secret_token=self.settings.webhook_secret,
-                    allowed_updates=allowed_updates,
-                    max_connections=self.settings.telegram_max_connections,
-                    drop_pending_updates=False,
-                )
-                info = await self.master_bot.get_webhook_info()
-            self.logger.info(
-                "master_webhook_reconciled reason=%s url_ok=%s allowed_ok=%s pending=%s last_error=%s",
-                reason,
-                info.url == url,
-                list(info.allowed_updates or []) == allowed_updates,
-                info.pending_update_count,
-                info.last_error_message,
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            self.logger.exception("master_webhook_reconcile_failed reason=%s", reason)
-
-    async def master_webhook_reconcile_loop(self) -> None:
-        await asyncio.sleep(8)
-        while not self.shutting_down:
-            await self.reconcile_master_webhook(reason="periodic")
-            await asyncio.sleep(30)
 
     async def bootstrap_children(self) -> None:
         for doc in await self.repositories.bots.list_enabled():
@@ -145,31 +86,8 @@ class BotManager:
         self.room_cleanup_task = asyncio.create_task(self._room_cleanup_loop())
 
     async def register_bot(self, token: str, owner_id: int, metadata: dict | None = None) -> BotInfo:
-        async with self.lock:
-            bot_id, username = await self.token_service.validate_token(token)
-            if await self.repositories.bots.get(bot_id):
-                raise ValueError("Ese bot_id ya está registrado")
-            secret = self.token_service.new_webhook_secret()
-            info_doc = {
-                "bot_id": bot_id,
-                "username": username,
-                "owner_id": owner_id,
-                "token_encrypted": self.token_service.encrypt(token),
-                "webhook_secret_encrypted": self.token_service.encrypt(secret),
-                "enabled": True,
-                "status": BotStatus.CREATED.value,
-                "config": {"features": {"media": True, "rooms": True, "webapp": True, "admin_feed": True}, "language": "es", "max_members_default": 100, **(metadata or {})},
-                "restart_count": 0,
-                "last_error": None,
-                "created_at": datetime.utcnow(),
-                "updated_at": datetime.utcnow(),
-            }
-            await self.repositories.bots.create(info_doc)
-        await self.start_bot(bot_id)
-        stored = await self.repositories.bots.get(bot_id)
-        info = BotInfo.from_document(stored or info_doc)
-        await self.notify_admins_new_bot(info, owner_id)
-        return info
+        """Public child creation API used by chat and Master Mini App."""
+        return await self.provisioner.create(token, owner_id, metadata)
 
     async def start_bot(self, bot_id: int) -> str:
         async with self.lock:
@@ -199,13 +117,7 @@ class BotManager:
                 dp.include_router(build_router(ctx))
                 if self.settings.mode == "webhook":
                     url = f"{self.settings.webhook_base_url}/telegram/webhook/{bot_id}"
-                    await bot.set_webhook(
-                        url=url,
-                        secret_token=secret,
-                        allowed_updates=["message", "callback_query"],
-                        max_connections=self.settings.telegram_max_connections,
-                        drop_pending_updates=self.settings.drop_pending_updates,
-                    )
+                    await bot.set_webhook(url=url, secret_token=secret, allowed_updates=dp.resolve_used_update_types(), max_connections=self.settings.telegram_max_connections, drop_pending_updates=self.settings.drop_pending_updates)
                     wh = await bot.get_webhook_info()
                     if wh.url != url:
                         raise RuntimeError("Webhook del bot hijo no coincide")

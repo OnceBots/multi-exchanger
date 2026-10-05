@@ -1,43 +1,17 @@
-## v8 - Consolidated webhook + creation fix
-
-- Consolidated the working webhook reconciliation from v5 with the child creation flow from v7.
-- Explicit Master and child `allowed_updates`: `message`, `callback_query`.
-- Added periodic Master webhook reconciliation after startup.
-- Added explicit `HEAD /` returning 200 for Render health probes.
-- Added webhook task exception observation and detailed update-type logs.
-- Preserved public child creation and privacy-oriented UI from v6/v7.
-
 # Changelog
 
-## v6 — 2026-10-04
+## v11.0.0 - Child Bot Provisioning
 
-- Refined Master and Child Bot HTML presentation with clearer hierarchy and richer copy.
-- Removed admin-feed wording from creator-facing navigation and direct-media error messages.
-- Kept administrator-only moderation controls private to `ADMIN_IDS`.
-- Added an explicit privacy/moderation disclosure in the Child Bot and Master help so administrative review is not concealed from users.
-- Reworked the admin moderation panel with an explicit reception toggle.
-- Improved direct-publication messaging so it reads as a normal product flow.
-
-
-## v2 — Public Master + Admin Feed + Premium Room UI
-
-- Master Bot is publicly usable for Child Bot creation.
-- Any Telegram user can start the Child Bot creation flow.
-- `ADMIN_IDS` receive a notification whenever a Child Bot is created.
-- Admin notification includes open, health and restart actions.
-- `/start` in a Child Bot automatically enables the persistent Admin Feed for `ADMIN_IDS`.
-- Admin Feed works without rooms and supports direct photos, videos, documents, animations, albums and non-command text.
-- Room and Admin Feed paths can coexist for the same multimedia update.
-- Albums remain grouped for the Admin Feed.
-- New room creation wizard from chat with visibility, capacity, media permissions and expiration.
-- Room management from chat: pause, resume, close, edit, share, permissions and moderation.
-- Public/private room deep links are supported.
-- Room expiration cleanup runs in the platform supervisor lifecycle.
-- Mini App redesigned with Telegram-aware theme variables, mobile-first layout, bottom navigation, skeletons, modals, toasts and room cards.
-- Mini App supports explore, my rooms, creation, details, join/leave, edit, permissions, moderation, profile and language preference.
-- Documentation updated for the new public Master and Admin Feed behaviour.
-
-## v9 - 2026-10-04
-- Fixed missing `asyncio` import in `app/main.py` that caused Render startup to fail.
-- Added defensive startup cleanup so partially initialized Mongo/HTTP resources are closed on startup exceptions.
-- Named the webhook reconciliation background task for clearer lifecycle/debugging.
+- Reworked child-bot creation using the proven flow from the supplied `iobot.py` reference:
+  - validate token with Telegram `getMe()` before provisioning;
+  - reject duplicate `bot_id` registrations;
+  - encrypt child token and webhook secret before persistence;
+  - persist child configuration in `STARTING` state;
+  - start the child runtime only after successful validation;
+  - keep failed creations recoverable in MongoDB;
+  - notify configured administrators after successful activation.
+- Kept production architecture on webhook mode; the source project's polling loop was not copied.
+- Added a working `/master-app` Mini App with a Mansia-style create-bot window (name, username/URL, BotFather token).
+- Added authenticated `POST /api/master/create-bot` using Telegram WebApp `initData`.
+- Fixed owner-facing bot information so the internal administrator feed count is not exposed to bot owners.
+- Added diagnostic logging for the creation lifecycle without logging tokens.
