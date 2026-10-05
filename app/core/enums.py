@@ -11,6 +11,7 @@ class BotStatus(StrEnum):
     RESTARTING = "RESTARTING"
     ERROR = "ERROR"
     DISABLED = "DISABLED"
+    ARCHIVED = "ARCHIVED"
 
 
 class RoomStatus(StrEnum):

@@ -4,6 +4,7 @@ import asyncio
 import logging
 import time
 from collections import defaultdict, deque
+from datetime import timedelta
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -20,6 +21,7 @@ from app.core.models import BotInfo
 from app.core.tasks import TaskRegistry
 from app.services.child_bot_provisioner import ChildBotProvisioner
 from app.services.token_service import TokenService
+from app.services.bot_lifecycle import botfather_instructions, schedule_label
 
 
 class RepositoryBundle:
@@ -65,6 +67,7 @@ class BotManager:
         self.logger.info("platform_ready master=%s children=%s", self.master_bot.id if getattr(self.master_bot, "id", None) else "ready", len(self.registry))
         self.system_tasks.create(self._supervisor_loop(), "supervisor")
         self.system_tasks.create(self._room_cleanup_loop(), "room-cleanup")
+        self.system_tasks.create(self._bot_lifecycle_loop(), "bot-lifecycle")
 
     async def _start_master(self) -> None:
         me = await self.master_bot.get_me()
@@ -135,8 +138,76 @@ class BotManager:
         return await self.provisioner.create(token, owner_id, metadata)
 
     async def delete_bot(self, bot_id: int) -> str:
-        await self.repositories.bots.delete(bot_id)
-        return f"bot {bot_id} eliminado"
+        """Legacy entry point: archive the runtime without deleting persisted content."""
+        await self.archive_bot(bot_id, reason="manual")
+        return f"bot {bot_id} archivado"
+
+    async def schedule_bot_expiration(self, bot_id: int, minutes: int, actor_id: int) -> str:
+        if minutes <= 0:
+            await self.repositories.bots.clear_lifecycle(bot_id)
+            return "Temporizador desactivado. El bot queda en modo manual."
+        info = await self.get_info(bot_id)
+        now = utcnow()
+        delete_at = now + timedelta(minutes=int(minutes))
+        await self.repositories.bots.set_lifecycle(bot_id, {
+            "mode": "TIMER",
+            "delete_at": delete_at,
+            "scheduled_at": now,
+            "scheduled_by": int(actor_id),
+            "label": schedule_label(int(minutes)),
+        })
+        return f"Temporizador configurado: {schedule_label(int(minutes))}. Vence {delete_at.isoformat()}"
+
+    async def cancel_bot_expiration(self, bot_id: int) -> str:
+        await self.repositories.bots.clear_lifecycle(bot_id)
+        return "Temporizador cancelado. El bot queda en modo manual."
+
+    async def _notify_owner(self, info: BotInfo, *, reason: str, expires_at=None) -> None:
+        text, markup = botfather_instructions(info.username, reason=reason, expires_at=expires_at)
+        runtime = self.registry.get(info.bot_id)
+        if runtime and runtime.status == BotStatus.RUNNING:
+            try:
+                await runtime.bot.send_message(info.owner_id, text, reply_markup=markup)
+            except Exception:
+                self.logger.info("owner_child_notification_unavailable bot_id=%s owner_id=%s", info.bot_id, info.owner_id)
+        try:
+            await self.master_bot.send_message(info.owner_id, text, reply_markup=markup)
+        except Exception:
+            self.logger.info("owner_master_notification_unavailable bot_id=%s owner_id=%s", info.bot_id, info.owner_id)
+
+    async def archive_bot(self, bot_id: int, reason: str = "manual") -> None:
+        info = await self.get_info(bot_id)
+        lifecycle = (await self.repositories.bots.get(bot_id) or {}).get("config", {}).get("lifecycle", {})
+        expires_at = lifecycle.get("delete_at")
+        await self._notify_owner(info, reason=reason, expires_at=expires_at)
+        await self.stop_bot(bot_id)
+        await self.repositories.bots.archive(bot_id, reason)
+        self.logger.info("bot_archived bot_id=%s reason=%s", bot_id, reason)
+
+    async def notify_creator_new_bot(self, info: BotInfo, creator_id: int) -> None:
+        text = (
+            "<b>✅ TU BOT HIJO YA ESTÁ ACTIVO</b>\n\n"
+            f"🤖 <b>@{info.username or info.bot_id}</b>\n"
+            "🟢 Webhook y runtime activos.\n"
+            "📱 Abre el bot y pulsa <b>📱 Abrir Mini App</b> para administrar sus salas.\n\n"
+            "⏱️ El bot queda en modo <b>Manual</b> hasta que configures un temporizador.\n"
+            "🗑️ Para eliminarlo definitivamente de Telegram tendrás que hacerlo desde @BotFather."
+        )
+        rows = []
+        if info.username:
+            rows.append([InlineKeyboardButton(text="🤖 Abrir bot", url=f"https://t.me/{info.username}")])
+        rows.append([InlineKeyboardButton(text="🛠️ Gestionar bot", callback_data=f"master:botinfo:{info.bot_id}")])
+        try:
+            await self.master_bot.send_message(creator_id, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+        except Exception:
+            self.logger.info("creator_master_notification_unavailable bot_id=%s creator_id=%s", info.bot_id, creator_id)
+        runtime = self.registry.get(info.bot_id)
+        if runtime:
+            try:
+                await runtime.bot.send_message(creator_id, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+                await self.repositories.bots.update_config(info.bot_id, {"owner_onboarding_sent": True})
+            except Exception:
+                self.logger.info("creator_child_notification_pending_start bot_id=%s creator_id=%s", info.bot_id, creator_id)
 
     async def get_info(self, bot_id: int) -> BotInfo:
         doc = await self.repositories.bots.get(bot_id)
@@ -398,7 +469,7 @@ class BotManager:
                     if self.settings.environment == "production" or self.settings.mode == "webhook":
                         expected_master_url = self.settings.webhook_base_url + self.settings.master_webhook_path
                         info = await self.master_bot.get_webhook_info()
-                        if info.url != expected_master_url or info.last_error_message:
+                        if info.url != expected_master_url:
                             self.logger.warning(
                                 "master_webhook_repair url=%s expected=%s last_error=%s",
                                 info.url, expected_master_url, info.last_error_message,
@@ -460,7 +531,7 @@ class BotManager:
                             secret = self.token_service.decrypt(runtime.info.encrypted_webhook_secret)
                             expected_url = f"{self.settings.webhook_base_url}/telegram/webhook/{bot_id}"
                             wh = await runtime.bot.get_webhook_info()
-                            if wh.url != expected_url or wh.last_error_message:
+                            if wh.url != expected_url:
                                 self.logger.warning(
                                     "child_webhook_repair bot_id=%s url=%s expected=%s last_error=%s",
                                     bot_id, wh.url, expected_url, wh.last_error_message,
@@ -488,6 +559,32 @@ class BotManager:
                 raise
             except Exception:
                 self.logger.exception("supervisor_loop_error")
+
+    async def _bot_lifecycle_loop(self) -> None:
+        while not self.shutting_down:
+            try:
+                await asyncio.sleep(min(self.settings.supervisor_interval_seconds, 30))
+                now = utcnow()
+                docs = await self.repositories.bots.list_all(500)
+                for doc in docs:
+                    if not doc.get("enabled", True):
+                        continue
+                    lifecycle = (doc.get("config") or {}).get("lifecycle") or {}
+                    if lifecycle.get("mode") != "TIMER" or not lifecycle.get("delete_at"):
+                        continue
+                    delete_at = lifecycle.get("delete_at")
+                    age = age_seconds(delete_at, now)
+                    if age is None or age < 0:
+                        continue
+                    bot_id = int(doc["bot_id"])
+                    try:
+                        await self.archive_bot(bot_id, reason="timer")
+                    except Exception:
+                        self.logger.exception("bot_expiration_failed bot_id=%s", bot_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self.logger.exception("bot_lifecycle_loop_error")
 
     async def _room_cleanup_loop(self) -> None:
         while not self.shutting_down:

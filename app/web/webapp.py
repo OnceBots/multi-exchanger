@@ -31,10 +31,12 @@ class CreateRoomBody(BaseModel):
     allow_files: bool = True
     allow_animation: bool = True
     allow_albums: bool = True
+    password: str | None = Field(default=None, min_length=4, max_length=64)
 
 
 class RoomRefBody(BaseModel):
     room_id: str = Field(min_length=1, max_length=64)
+    password: str | None = Field(default=None, max_length=64)
 
 
 def build_webapp_router(platform) -> APIRouter:
@@ -161,6 +163,7 @@ def build_webapp_router(platform) -> APIRouter:
                 "allow_albums": body.allow_albums,
             },
             body.duration_minutes,
+            body.password,
         )
         room = dict(room)
         username = (runtime.ctx.bot_username or "").lstrip("@").strip()
@@ -174,7 +177,13 @@ def build_webapp_router(platform) -> APIRouter:
         user, _ = auth_child(request, runtime)
         if not user or not user.get("id"):
             raise HTTPException(status_code=401, detail="Mini App no autenticada")
-        ok, message, room = await runtime.ctx.services.rooms.join(bot_id, int(user["id"]), room_id)
+        body = {}
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        password = body.get("password") if isinstance(body, dict) else None
+        ok, message, room = await runtime.ctx.services.rooms.join(bot_id, int(user["id"]), room_id, password=password)
         if not ok:
             raise HTTPException(status_code=400, detail=message)
         return json_safe({"ok": True, "message": message, "room": room})

@@ -5,6 +5,7 @@ import string
 
 from app.core.datetime import utcnow
 from app.core.enums import MemberRole, RoomStatus, RoomVisibility
+from app.services.passwords import hash_password, verify_password
 
 
 class RoomRepository:
@@ -17,7 +18,7 @@ class RoomRepository:
         alphabet = string.ascii_uppercase + string.digits
         return "".join(secrets.choice(alphabet) for _ in range(7))
 
-    async def create(self, bot_id: int, owner_id: int, visibility: str, max_members: int, settings: dict, duration_minutes: int) -> dict:
+    async def create(self, bot_id: int, owner_id: int, visibility: str, max_members: int, settings: dict, duration_minutes: int, password: str | None = None) -> dict:
         created = utcnow()
         expires_at = None
         if duration_minutes > 0:
@@ -33,6 +34,13 @@ class RoomRepository:
             invite_code = self._code()
         else:
             raise RuntimeError("No se pudo generar un código único para la sala.")
+        password_record = None
+        if visibility == RoomVisibility.PRIVATE.value:
+            if not password or len(password.strip()) < 4:
+                raise ValueError("Las salas privadas requieren una contraseña de al menos 4 caracteres.")
+            if len(password.strip()) > 64:
+                raise ValueError("La contraseña no puede superar 64 caracteres.")
+            password_record = hash_password(password)
         room = {
             "bot_id": bot_id,
             "room_id": room_id,
@@ -43,6 +51,8 @@ class RoomRepository:
             "visibility": visibility,
             "max_members": max_members,
             "settings": settings,
+            "password_protected": bool(password_record),
+            "password_hash": password_record,
             "status": RoomStatus.ACTIVE.value,
             "member_count": 1,
             "created_at": created,
@@ -92,13 +102,18 @@ class RoomRepository:
     async def members_for_room(self, bot_id: int, room_id: str) -> list[dict]:
         return await self.members.find({"bot_id": bot_id, "room_id": room_id}).sort("joined_at", 1).to_list(length=None)
 
-    async def join(self, bot_id: int, room_id: str, user_id: int) -> tuple[bool, str]:
+    async def join(self, bot_id: int, room_id: str, user_id: int, password: str | None = None) -> tuple[bool, str]:
         room = await self.get(bot_id, room_id)
         if not room or room.get("status") != RoomStatus.ACTIVE.value:
             return False, "La sala no existe o está inactiva."
         existing = await self.is_member(bot_id, room_id, user_id)
         if existing:
             return True, "Ya eres miembro."
+        if room.get("visibility") == RoomVisibility.PRIVATE.value and room.get("password_protected"):
+            if not password:
+                return False, "Esta sala privada requiere una contraseña."
+            if not verify_password(password, room.get("password_hash")):
+                return False, "La contraseña de la sala es incorrecta."
         if int(room.get("member_count", 0)) >= int(room.get("max_members", 999999)):
             return False, "La sala está llena."
         now = utcnow()

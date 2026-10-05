@@ -11,6 +11,7 @@ from urllib.parse import urlencode
 from app.services.webapp_auth import make_launch_token
 
 from app.services.token_service import InvalidBotTokenError
+from app.services.bot_lifecycle import botfather_instructions, schedule_label
 
 
 
@@ -121,11 +122,16 @@ def build_master_router(manager) -> Router:
         runtime = manager.registry.get(bot_id)
         status = runtime.status.value if runtime else info.status
         queue = runtime.broadcast_queue.qsize() if runtime and runtime.broadcast_queue else 0
+        lifecycle = (await manager.repositories.bots.get(bot_id) or {}).get("config", {}).get("lifecycle") or {}
+        timer_line = "⏱️ Modo: <b>Manual</b>"
+        if lifecycle.get("mode") == "TIMER" and lifecycle.get("delete_at"):
+            timer_line = f"⏱️ Vence: <code>{html.escape(str(lifecycle.get('delete_at')))}</code>"
         text = (
             f"<b>🤖 @{html.escape(info.username or str(info.bot_id))}</b>\n\n"
             f"🟢 Estado: <b>{html.escape(status)}</b>\n"
             f"🆔 <code>{info.bot_id}</code>\n"
             f"👤 Owner: <code>{info.owner_id}</code>\n"
+            f"{timer_line}\n"
             f"📦 Cola: <b>{queue}</b>\n"
             f"🔄 Reinicios: <b>{info.restart_count}</b>\n"
             f"❤️ Heartbeat: <code>{html.escape(str(info.last_heartbeat or '—'))}</code>"
@@ -133,6 +139,9 @@ def build_master_router(manager) -> Router:
         rows = []
         if info.username:
             rows.append([InlineKeyboardButton(text="🤖 Abrir bot", url=f"https://t.me/{info.username}")])
+        if uid == info.owner_id or uid in manager.settings.admin_ids:
+            rows.append([InlineKeyboardButton(text="⏱️ Temporizador", callback_data=f"master:timer:{bot_id}")])
+            rows.append([InlineKeyboardButton(text="📖 Eliminar en BotFather", callback_data=f"master:deletehelp:{bot_id}")])
         if uid in manager.settings.admin_ids:
             rows.extend([
                 [InlineKeyboardButton(text="▶️ Iniciar", callback_data=f"master:start:{bot_id}"), InlineKeyboardButton(text="⏹ Detener", callback_data=f"master:stop:{bot_id}")],
@@ -207,8 +216,8 @@ def build_master_router(manager) -> Router:
             elif action == "restart":
                 result = await manager.restart_bot(bot_id, reason="manual")
             elif action == "delete":
-                await manager.stop_bot(bot_id)
-                result = await manager.delete_bot(bot_id)
+                await manager.archive_bot(bot_id, reason="manual")
+                result = "Bot desactivado en la plataforma. Revisa el mensaje con los pasos de @BotFather."
                 await _safe_callback_answer(callback, result, show_alert=False)
                 await callback.message.edit_text("🗑️ Bot eliminado.", reply_markup=menu(int(callback.from_user.id)))
                 return
@@ -218,6 +227,50 @@ def build_master_router(manager) -> Router:
         except Exception as exc:
             await _safe_callback_answer(callback, str(exc)[:180], show_alert=True)
         await show_info(callback, bot_id)
+
+    @router.callback_query(F.data.startswith("master:timer:"))
+    async def timer_menu(callback: CallbackQuery) -> None:
+        bot_id = int(callback.data.split(":")[-1])
+        info = await manager.get_info(bot_id)
+        uid = int(callback.from_user.id)
+        if uid != info.owner_id and not is_admin(uid):
+            await _safe_callback_answer(callback, "No autorizado", show_alert=True)
+            return
+        await _safe_callback_answer(callback)
+        rows = [
+            [InlineKeyboardButton(text="5 min", callback_data=f"master:timer-set:{bot_id}:5"), InlineKeyboardButton(text="15 min", callback_data=f"master:timer-set:{bot_id}:15")],
+            [InlineKeyboardButton(text="30 min", callback_data=f"master:timer-set:{bot_id}:30"), InlineKeyboardButton(text="1 hora", callback_data=f"master:timer-set:{bot_id}:60")],
+            [InlineKeyboardButton(text="6 horas", callback_data=f"master:timer-set:{bot_id}:360"), InlineKeyboardButton(text="12 horas", callback_data=f"master:timer-set:{bot_id}:720")],
+            [InlineKeyboardButton(text="24 horas", callback_data=f"master:timer-set:{bot_id}:1440"), InlineKeyboardButton(text="48 horas", callback_data=f"master:timer-set:{bot_id}:2880")],
+            [InlineKeyboardButton(text="72 horas", callback_data=f"master:timer-set:{bot_id}:4320"), InlineKeyboardButton(text="♾️ Manual", callback_data=f"master:timer-set:{bot_id}:0")],
+            [InlineKeyboardButton(text="↩️ Volver", callback_data=f"master:botinfo:{bot_id}")],
+        ]
+        await callback.message.edit_text("<b>⏱️ Temporizador del bot</b>\n\nAl vencer, el runtime se detendrá y el contenido persistido no se borrará. Recibirás instrucciones de @BotFather.", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+
+    @router.callback_query(F.data.startswith("master:timer-set:"))
+    async def timer_set(callback: CallbackQuery) -> None:
+        _, _, bot_id_s, minutes_s = callback.data.split(":")
+        bot_id, minutes = int(bot_id_s), int(minutes_s)
+        info = await manager.get_info(bot_id)
+        uid = int(callback.from_user.id)
+        if uid != info.owner_id and not is_admin(uid):
+            await _safe_callback_answer(callback, "No autorizado", show_alert=True)
+            return
+        result = await manager.schedule_bot_expiration(bot_id, minutes, uid)
+        await _safe_callback_answer(callback, result[:190], show_alert=False)
+        await show_info(callback, bot_id)
+
+    @router.callback_query(F.data.startswith("master:deletehelp:"))
+    async def delete_help(callback: CallbackQuery) -> None:
+        bot_id = int(callback.data.split(":")[-1])
+        info = await manager.get_info(bot_id)
+        uid = int(callback.from_user.id)
+        if uid != info.owner_id and not is_admin(uid):
+            await _safe_callback_answer(callback, "No autorizado", show_alert=True)
+            return
+        text, markup = botfather_instructions(info.username, reason="manual")
+        await _safe_callback_answer(callback)
+        await callback.message.answer(text, reply_markup=markup)
 
     @router.callback_query(F.data.startswith("master:start:"))
     async def start_callback(callback: CallbackQuery) -> None:

@@ -68,3 +68,13 @@ child_webhook_processed ...
 ```
 
 Si Telegram entrega el update pero un handler falla, debe aparecer `dispatch_failed` con traceback en lugar de quedar silencioso.
+
+## Final lifecycle and rooms behavior
+
+- Bot child lifecycle supports manual mode plus expiration timers in minutes/hours.
+- When a timer expires, the child runtime/webhook is stopped and the bot is archived in the platform without deleting rooms, members, media events, audit data, or other persisted content.
+- The owner receives the BotFather deletion steps from the Master and, when the child chat is available, from the child bot as well.
+- Manual deletion controls only prepare/disable the platform runtime; definitive Telegram account deletion is performed by the owner in @BotFather via /mybots -> select bot -> Delete Bot.
+- Public rooms require no password. Private rooms can require a password of 4-64 characters; the password is stored as a PBKDF2 hash.
+- Every room gets a unique 7-character A-Z/0-9 invite code and a Telegram deep-link.
+- Regular users only see the user-facing room/privacy UI; technical logs, audit controls, and moderation tooling remain internal to the platform. The product keeps a general privacy/moderation notice rather than hiding data-processing behavior.

@@ -152,3 +152,11 @@ The child interface is a Telegram Mini App (Web App): Telegram launches a hosted
 
 Los `callback_query` de Telegram son efímeros y no deben volver a contestarse después de un reinicio. La plataforma ahora omite esos updates durante el replay y trata los errores de consulta caducada como no fatales.
 
+
+## Final features
+
+### Bot lifecycle
+Use the Master or the child owner's panel to choose `Manual`, `5 min`, `15 min`, `30 min`, `1 h`, `6 h`, `12 h`, `24 h`, `48 h`, or `72 h`. When the timer expires, the runtime is stopped and archived while persisted room/content data remains in MongoDB. The owner receives instructions for permanent Telegram deletion through @BotFather.
+
+### Rooms
+Rooms have no custom name or description. Each one gets a random 7-character A-Z/0-9 code, a maximum member count, and a shareable Telegram deep-link. Private rooms may require a 4-64 character password; only a PBKDF2 hash is stored.

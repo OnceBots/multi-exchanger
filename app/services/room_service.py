@@ -7,8 +7,15 @@ class RoomService:
     def __init__(self, repositories) -> None:
         self.repositories = repositories
 
-    async def create_room(self, bot_id: int, owner_id: int, visibility: str, max_members: int, settings: dict, duration_minutes: int) -> dict:
-        return await self.repositories.room.create(bot_id, owner_id, visibility, max(2, min(max_members, 10000)), settings, max(0, duration_minutes))
+    async def create_room(self, bot_id: int, owner_id: int, visibility: str, max_members: int, settings: dict, duration_minutes: int, password: str | None = None) -> dict:
+        max_members = max(2, min(max_members, 10000))
+        if visibility == RoomVisibility.PRIVATE.value:
+            password = (password or "").strip()
+            if len(password) < 4:
+                raise ValueError("Las salas privadas requieren una contraseña de al menos 4 caracteres.")
+        else:
+            password = None
+        return await self.repositories.room.create(bot_id, owner_id, visibility, max_members, settings, max(0, duration_minutes), password)
 
     async def can_manage(self, bot_id: int, room_id: str, user_id: int) -> bool:
         member = await self.repositories.room.member(bot_id, room_id, user_id)
@@ -18,11 +25,11 @@ class RoomService:
         member = await self.repositories.room.member(bot_id, room_id, user_id)
         return bool(member and member.get("role") == MemberRole.OWNER.value)
 
-    async def join(self, bot_id: int, user_id: int, ref: str) -> tuple[bool, str, dict | None]:
+    async def join(self, bot_id: int, user_id: int, ref: str, password: str | None = None) -> tuple[bool, str, dict | None]:
         room = await self.repositories.room.resolve(bot_id, ref)
         if not room:
             return False, "No encontramos la sala.", None
-        ok, message = await self.repositories.room.join(bot_id, room["room_id"], user_id)
+        ok, message = await self.repositories.room.join(bot_id, room["room_id"], user_id, password=password)
         return ok, message, await self.repositories.room.get(bot_id, room["room_id"])
 
     async def leave(self, bot_id: int, room_id: str, user_id: int) -> tuple[bool, str]:

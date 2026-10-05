@@ -57,5 +57,33 @@ class BotRepository:
         fields["updated_at"] = utcnow()
         await self.col.update_one({"bot_id": bot_id}, {"$set": fields})
 
+
+    async def set_lifecycle(self, bot_id: int, lifecycle: dict) -> None:
+        await self.col.update_one(
+            {"bot_id": int(bot_id)},
+            {"$set": {"config.lifecycle": lifecycle, "updated_at": utcnow()}},
+        )
+
+    async def clear_lifecycle(self, bot_id: int) -> None:
+        await self.col.update_one(
+            {"bot_id": int(bot_id)},
+            {"$unset": {"config.lifecycle": ""}, "$set": {"updated_at": utcnow()}},
+        )
+
+    async def archive(self, bot_id: int, reason: str) -> None:
+        now = utcnow()
+        await self.col.update_one(
+            {"bot_id": int(bot_id)},
+            {"$set": {
+                "enabled": False,
+                "status": "ARCHIVED",
+                "updated_at": now,
+                "archived_at": now,
+                "config.lifecycle.mode": "ARCHIVED",
+                "config.lifecycle.reason": reason,
+                "config.lifecycle.archived_at": now,
+            }},
+        )
+
     async def delete(self, bot_id: int) -> None:
         await self.col.delete_one({"bot_id": int(bot_id)})

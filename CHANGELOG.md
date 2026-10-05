@@ -64,3 +64,12 @@
 - Added JSON-safe serialization for MongoDB documents returned by Mini App APIs.
 - Excluded MongoDB `_id` values from room/user API payloads.
 - Hardened room API error logging.
+
+## Finalization
+- Bot lifecycle timers with persistent expiration and user notifications.
+- Manual BotFather deletion instructions from Master and child bot.
+- Child creation notifies creator via Master and best-effort via the child bot.
+- Rooms now enforce max members at creation and support password-protected private rooms.
+- Room passwords are stored as PBKDF2 hashes, never plaintext.
+- Fixed supervisor webhook false repairs by ignoring historical Telegram last-error text when the configured webhook URL is still correct.
+- Archived bot runtimes keep MongoDB room/content data intact.

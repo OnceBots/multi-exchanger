@@ -51,4 +51,5 @@ class ChildBotProvisioner:
 
         info = await self.manager.get_info(bot_id)
         await self.manager.notify_admins_new_bot(info, owner_id)
+        await self.manager.notify_creator_new_bot(info, owner_id)
         return info
