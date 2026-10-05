@@ -54,17 +54,21 @@ class RoomRepository:
         return room
 
     async def get(self, bot_id: int, room_id: str) -> dict | None:
-        return await self.rooms.find_one({"bot_id": bot_id, "room_id": room_id})
+        return await self.rooms.find_one({"bot_id": bot_id, "room_id": room_id}, {"_id": 0})
 
     async def resolve(self, bot_id: int, ref: str) -> dict | None:
         ref = ref.strip()
-        room = await self.rooms.find_one({"bot_id": bot_id, "room_id": ref})
+        room = await self.rooms.find_one({"bot_id": bot_id, "room_id": ref}, {"_id": 0})
         if room:
             return room
-        return await self.rooms.find_one({"bot_id": bot_id, "invite_code": ref.upper()})
+        return await self.rooms.find_one({"bot_id": bot_id, "invite_code": ref.upper()}, {"_id": 0})
 
     async def list_public(self, bot_id: int, limit: int = 20) -> list[dict]:
-        return await self.rooms.find({"bot_id": bot_id, "visibility": RoomVisibility.PUBLIC.value, "status": RoomStatus.ACTIVE.value}).sort("created_at", -1).limit(limit).to_list(length=limit)
+        cursor = self.rooms.find(
+            {"bot_id": bot_id, "visibility": RoomVisibility.PUBLIC.value, "status": RoomStatus.ACTIVE.value},
+            {"_id": 0},
+        ).sort("created_at", -1).limit(limit)
+        return await cursor.to_list(length=limit)
 
     async def list_for_user(self, bot_id: int, user_id: int, limit: int = 50) -> list[dict]:
         pipeline = [
@@ -72,6 +76,7 @@ class RoomRepository:
             {"$lookup": {"from": "rooms", "let": {"rid": "$room_id", "bid": "$bot_id"}, "pipeline": [{"$match": {"$expr": {"$and": [{"$eq": ["$room_id", "$$rid"]}, {"$eq": ["$bot_id", "$$bid"]}]}}}], "as": "room"}},
             {"$unwind": "$room"},
             {"$replaceRoot": {"newRoot": "$room"}},
+            {"$project": {"_id": 0}},
             {"$sort": {"created_at": -1}},
             {"$limit": limit},
         ]

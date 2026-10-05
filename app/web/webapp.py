@@ -6,6 +6,10 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
+try:
+    from bson import ObjectId
+except ImportError:
+    ObjectId = ()
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.core.enums import RoomVisibility
@@ -43,6 +47,15 @@ def build_webapp_router(platform) -> APIRouter:
         "Pragma": "no-cache",
         "Expires": "0",
     }
+
+    def json_safe(value):
+        if isinstance(value, dict):
+            return {k: json_safe(v) for k, v in value.items() if k != "_id"}
+        if isinstance(value, list):
+            return [json_safe(v) for v in value]
+        if ObjectId and isinstance(value, ObjectId):
+            return str(value)
+        return value
 
     @router.get("/master-app", response_class=HTMLResponse)
     async def master_app():
@@ -106,10 +119,16 @@ def build_webapp_router(platform) -> APIRouter:
             )
             raise HTTPException(status_code=401, detail="Mini App no autenticada. Ábrela desde el botón Mini App de Telegram.")
         uid = int(user["id"])
-        rooms = await runtime.ctx.repositories.room.list_for_user(bot_id, uid, 50)
-        public = await runtime.ctx.repositories.room.list_public(bot_id, 50)
-        profile = await runtime.ctx.repositories.user.get(bot_id, uid) or {"bot_id": bot_id, "user_id": uid}
-        return {"ok": True, "bot_id": bot_id, "bot_username": runtime.ctx.bot_username, "user_id": uid, "auth_source": source, "profile": profile, "mine": rooms, "public": public}
+        try:
+            rooms = await runtime.ctx.repositories.room.list_for_user(bot_id, uid, 50)
+            public = await runtime.ctx.repositories.room.list_public(bot_id, 50)
+            profile = await runtime.ctx.repositories.user.get(bot_id, uid) or {"bot_id": bot_id, "user_id": uid}
+            response = {"ok": True, "bot_id": bot_id, "bot_username": runtime.ctx.bot_username, "user_id": uid, "auth_source": source, "profile": profile, "mine": rooms, "public": public}
+            logger.info("mini_app_rooms_ok bot_id=%s user_id=%s auth_source=%s mine=%s public=%s", bot_id, uid, source, len(rooms), len(public))
+            return json_safe(response)
+        except Exception as exc:
+            logger.exception("mini_app_rooms_failed bot_id=%s user_id=%s auth_source=%s", bot_id, uid, source)
+            raise HTTPException(status_code=500, detail="No se pudieron cargar las salas. Error interno del servidor.") from exc
 
     @router.get("/api/child/profile")
     async def child_profile(request: Request, bot_id: int):
@@ -119,7 +138,7 @@ def build_webapp_router(platform) -> APIRouter:
             raise HTTPException(status_code=401, detail="Mini App no autenticada")
         uid = int(user["id"])
         profile = await runtime.ctx.repositories.user.get(bot_id, uid) or {"bot_id": bot_id, "user_id": uid}
-        return {"ok": True, "profile": profile}
+        return json_safe({"ok": True, "profile": profile})
 
     @router.post("/api/child/rooms")
     async def create_room(request: Request, bot_id: int, body: CreateRoomBody):
@@ -147,7 +166,7 @@ def build_webapp_router(platform) -> APIRouter:
         username = (runtime.ctx.bot_username or "").lstrip("@").strip()
         if username and room.get("invite_code"):
             room["share_link"] = f"https://t.me/{username}?start=room_{room['invite_code']}"
-        return {"ok": True, "room": room}
+        return json_safe({"ok": True, "room": room})
 
     @router.post("/api/child/rooms/{room_id}/join")
     async def join_room(request: Request, room_id: str, bot_id: int):
@@ -158,7 +177,7 @@ def build_webapp_router(platform) -> APIRouter:
         ok, message, room = await runtime.ctx.services.rooms.join(bot_id, int(user["id"]), room_id)
         if not ok:
             raise HTTPException(status_code=400, detail=message)
-        return {"ok": True, "message": message, "room": room}
+        return json_safe({"ok": True, "message": message, "room": room})
 
     @router.post("/api/child/rooms/{room_id}/leave")
     async def leave_room(request: Request, room_id: str, bot_id: int):

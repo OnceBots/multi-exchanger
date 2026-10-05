@@ -8,7 +8,7 @@ class UserRepository:
         self.col = mongo.collection("users")
 
     async def get(self, bot_id: int, user_id: int) -> dict | None:
-        return await self.col.find_one({"bot_id": bot_id, "user_id": user_id})
+        return await self.col.find_one({"bot_id": bot_id, "user_id": user_id}, {"_id": 0})
 
     async def upsert_from_telegram(self, bot_id: int, user) -> dict:
         data = {

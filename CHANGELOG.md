@@ -58,3 +58,9 @@
 - Fixed `RoomRepository.list_for_user()` for PyMongo Async: `aggregate()` is awaited before calling `to_list()`.
 - Added regression test `tests/test_rooms_repository.py`.
 - No change to Telegram webhook architecture or Mini App launch mechanism.
+
+## v12 - Mini App auth/500 hardening
+- Fixed misleading Mini App "Autenticación fallida" status when the API returns HTTP 500.
+- Added JSON-safe serialization for MongoDB documents returned by Mini App APIs.
+- Excluded MongoDB `_id` values from room/user API payloads.
+- Hardened room API error logging.
