@@ -4,7 +4,7 @@ services:
     env: docker
     plan: starter
     autoDeploy: true
-    healthCheckPath: /ready
+    healthCheckPath: /health
     envVars:
       - key: MASTER_BOT_TOKEN
         sync: false
@@ -32,3 +32,7 @@ services:
         sync: false
       - key: LOG_LEVEL
         value: INFO
+      - key: DROP_PENDING_UPDATES
+        value: false
+      - key: ADMIN_FEED_ENABLED_BY_DEFAULT
+        value: true

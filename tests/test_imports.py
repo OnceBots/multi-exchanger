@@ -1,4 +1,5 @@
-def test_package_files_exist():
-    from pathlib import Path
-    assert Path("app/main.py").exists()
-    assert Path("requirements.txt").exists()
+def test_import_core_modules():
+    import app.config
+    import app.core.models
+    import app.core.datetime
+    import app.services.webapp_auth

@@ -4,28 +4,22 @@ import asyncio
 import logging
 import time
 from collections import defaultdict, deque
-from datetime import datetime, timezone
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramAPIError
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from app.bot.child_handlers import build_router
+from app.bot.child_handlers import build_router as build_child_router
+from app.bot.child_factory import build_child_services
 from app.bot.runtime import BotRuntime
-from app.core.context import BotContext
+from app.core.datetime import age_seconds, utcnow
 from app.core.enums import BotStatus
-from app.core.exceptions import BotAlreadyRunningError, BotNotFoundError
-from app.core.models import BotConfig, BotInfo, ensure_utc
-from app.core.task_registry import TaskRegistry
-from app.services.token_service import TokenService
+from app.core.models import BotInfo
+from app.core.tasks import TaskRegistry
 from app.services.child_bot_provisioner import ChildBotProvisioner
-from app.services.webapp_auth import validate_init_data
-from app.utils.backoff import backoff_delay
-
-
-class BotRegistry(dict[int, BotRuntime]):
-    pass
+from app.services.token_service import TokenService
 
 
 class RepositoryBundle:
@@ -37,6 +31,7 @@ class RepositoryBundle:
         from app.db.repositories.rooms import RoomRepository
         from app.db.repositories.sessions import SessionRepository
         from app.db.repositories.users import UserRepository
+
         self.bots = BotRepository(mongo)
         self.user = UserRepository(mongo)
         self.room = RoomRepository(mongo)
@@ -53,181 +48,146 @@ class BotManager:
         self.repositories = RepositoryBundle(mongo)
         self.token_service = TokenService(secret_box, settings.child_webhook_secret_length)
         self.provisioner = ChildBotProvisioner(self)
-        self.registry: BotRegistry = BotRegistry()
+        self.registry: dict[int, BotRuntime] = {}
         self.logger = logging.getLogger("bot.manager")
         self.lock = asyncio.Lock()
-        self.supervisor_task: asyncio.Task[object] | None = None
-        self.room_cleanup_task: asyncio.Task[object] | None = None
+        self.system_tasks = TaskRegistry("system")
+        self.restart_history: dict[int, deque[float]] = defaultdict(deque)
+        self.shutting_down = False
+        self.ready = False
         self.master_bot = Bot(settings.master_bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
         self.master_dp = Dispatcher()
-        self._failure_times: dict[int, deque[float]] = defaultdict(deque)
-        self.shutting_down = False
 
-    async def start_master(self) -> None:
+    async def start(self) -> None:
+        await self._start_master()
+        await self._bootstrap_children()
+        self.ready = True
+        self.logger.info("platform_ready master=%s children=%s", self.master_bot.id if getattr(self.master_bot, "id", None) else "ready", len(self.registry))
+        self.system_tasks.create(self._supervisor_loop(), "supervisor")
+        self.system_tasks.create(self._room_cleanup_loop(), "room-cleanup")
+
+    async def _start_master(self) -> None:
         me = await self.master_bot.get_me()
+        self.master_bot_username = me.username or ""
         self.logger.info("master_ready username=@%s id=%s", me.username, me.id)
         from app.bot.master_handlers import build_master_router
         self.master_dp.include_router(build_master_router(self))
-        if self.settings.mode == "webhook":
-            url = self.settings.webhook_base_url + self.settings.master_webhook_path
-            await self._set_and_verify_webhook(
-                self.master_bot,
-                url=url,
-                secret_token=self.settings.webhook_secret,
-                allowed_updates=self.master_dp.resolve_used_update_types(),
-                label="master",
-            )
+        if self.settings.environment == "production":
+            await self.configure_webhook(self.master_bot, self.settings.webhook_base_url + self.settings.master_webhook_path, self.settings.webhook_secret, "master", self.master_dp)
+        elif self.settings.mode == "webhook":
+            await self.configure_webhook(self.master_bot, self.settings.webhook_base_url + self.settings.master_webhook_path, self.settings.webhook_secret, "master", self.master_dp)
         else:
-            self.master_dp_task = asyncio.create_task(self.master_dp.start_polling(self.master_bot, handle_signals=False))
+            self.system_tasks.create(self.master_dp.start_polling(self.master_bot, handle_signals=False), "master-polling")
 
-    async def bootstrap_children(self) -> None:
-        """Start all enabled children before the platform becomes READY.
-
-        One invalid/transient child must not abort the whole platform, but its
-        exception is always consumed and persisted by ``start_bot``.
-        """
-        docs = await self.repositories.bots.list_enabled()
-        tasks = [
-            asyncio.create_task(self.start_bot(int(doc["bot_id"])), name=f"child-start:{int(doc['bot_id'])}")
-            for doc in docs
-        ]
-        if tasks:
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            for doc, result in zip(docs, results, strict=False):
-                if isinstance(result, Exception):
-                    self.logger.error(
-                        "child_bootstrap_failed bot_id=%s error=%s",
-                        doc.get("bot_id"),
-                        result,
-                        exc_info=(type(result), result, result.__traceback__),
-                    )
-
-        self.supervisor_task = asyncio.create_task(self._supervisor_loop(), name="bot-supervisor")
-        self.room_cleanup_task = asyncio.create_task(self._room_cleanup_loop(), name="room-cleanup")
-
-    async def _set_and_verify_webhook(
-        self,
-        bot: Bot,
-        *,
-        url: str,
-        secret_token: str,
-        allowed_updates: list[str],
-        label: str,
-        attempts: int = 3,
-    ) -> None:
+    async def configure_webhook(self, bot: Bot, url: str, secret: str, label: str, dispatcher: Dispatcher) -> None:
+        allowed = dispatcher.resolve_used_update_types() or ["message", "callback_query"]
         last_error: Exception | None = None
-        for attempt in range(1, attempts + 1):
+        for attempt in range(1, 4):
             try:
-                self.logger.info(
-                    "webhook_configuring label=%s attempt=%s/%s url=%s allowed=%s",
-                    label, attempt, attempts, url, allowed_updates,
-                )
+                self.logger.info("webhook_configuring label=%s attempt=%s/3 url=%s allowed=%s", label, attempt, url, allowed)
                 await bot.set_webhook(
                     url=url,
-                    secret_token=secret_token,
-                    allowed_updates=allowed_updates,
+                    secret_token=secret,
+                    allowed_updates=allowed,
                     max_connections=self.settings.telegram_max_connections,
                     drop_pending_updates=self.settings.drop_pending_updates,
                 )
                 info = await bot.get_webhook_info()
                 if info.url != url:
-                    raise RuntimeError(
-                        f"Webhook de {label} no coincide: esperado={url!r} recibido={info.url!r}"
-                    )
-                self.logger.info(
-                    "webhook_ready label=%s pending=%s last_error=%s",
-                    label, info.pending_update_count, info.last_error_message,
-                )
+                    raise RuntimeError(f"Telegram devolvió webhook distinto: {info.url!r}")
+                if info.last_error_message:
+                    self.logger.warning("webhook_last_error label=%s error=%s date=%s", label, info.last_error_message, info.last_error_date)
+                self.logger.info("webhook_ready label=%s pending=%s last_error=%s", label, info.pending_update_count, info.last_error_message)
                 return
             except Exception as exc:
                 last_error = exc
-                self.logger.warning(
-                    "webhook_config_failed label=%s attempt=%s/%s error=%s",
-                    label, attempt, attempts, exc,
-                )
-                if attempt < attempts:
-                    await asyncio.sleep(min(2 * attempt, 5))
-        raise RuntimeError(f"No se pudo configurar el webhook de {label}") from last_error
+                self.logger.warning("webhook_config_failed label=%s attempt=%s error=%s", label, attempt, exc)
+                if attempt < 3:
+                    await asyncio.sleep(attempt * 1.5)
+        raise RuntimeError(f"No se pudo configurar el webhook de {label}: {last_error}")
 
-    def _child_start_done(self, task: asyncio.Task) -> None:
-        """Consume bootstrap task exceptions so one bad child cannot kill startup.
-
-        ``start_bot`` persists the ERROR state on failure; here we only make sure
-        the exception is observed and logged instead of producing
-        ``Task exception was never retrieved`` noise.
-        """
-        try:
-            exc = task.exception()
-        except asyncio.CancelledError:
-            return
-        if exc is not None:
-            self.logger.error("child_bootstrap_failed error=%s", exc, exc_info=exc)
+    async def _bootstrap_children(self) -> None:
+        docs = await self.repositories.bots.list_enabled()
+        failures = 0
+        for doc in docs:
+            bot_id = int(doc["bot_id"])
+            try:
+                await self.start_bot(bot_id)
+            except Exception:
+                failures += 1
+                self.logger.exception("child_bootstrap_failed bot_id=%s", bot_id)
+        self.logger.info("children_bootstrap_complete total=%s running=%s failures=%s", len(docs), len(self.registry), failures)
 
     async def register_bot(self, token: str, owner_id: int, metadata: dict | None = None) -> BotInfo:
-        """Public child creation API used by chat and Master Mini App."""
         return await self.provisioner.create(token, owner_id, metadata)
+
+    async def delete_bot(self, bot_id: int) -> str:
+        await self.repositories.bots.delete(bot_id)
+        return f"bot {bot_id} eliminado"
+
+    async def get_info(self, bot_id: int) -> BotInfo:
+        doc = await self.repositories.bots.get(bot_id)
+        if not doc:
+            raise ValueError("Bot no encontrado")
+        return BotInfo.from_document(doc)
 
     async def start_bot(self, bot_id: int) -> str:
         async with self.lock:
-            if bot_id in self.registry:
-                runtime = self.registry[bot_id]
-                if runtime.status in {BotStatus.STARTING, BotStatus.RUNNING, BotStatus.RESTARTING}:
-                    raise BotAlreadyRunningError(f"Bot {bot_id} ya está ejecutándose")
+            if bot_id in self.registry and self.registry[bot_id].status in {BotStatus.STARTING, BotStatus.RUNNING, BotStatus.RESTARTING}:
+                return f"bot {bot_id} already running"
+
             doc = await self.repositories.bots.get(bot_id)
             if not doc:
-                raise BotNotFoundError(str(bot_id))
-            if not doc.get("enabled", True):
+                raise ValueError(f"Bot {bot_id} no existe")
+            if not bool(doc.get("enabled", True)):
                 raise ValueError("El bot está deshabilitado")
+
             info = BotInfo.from_document(doc)
             token = self.token_service.decrypt(info.encrypted_token)
             secret = self.token_service.decrypt(info.encrypted_webhook_secret)
             bot = Bot(token=token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-            dp = Dispatcher()
-            runtime = BotRuntime(info=info, bot=bot, dispatcher=dp, status=BotStatus.STARTING)
+            dispatcher = Dispatcher()
+            runtime = BotRuntime(info=info, bot=bot, dispatcher=dispatcher, status=BotStatus.STARTING)
+            runtime.broadcast_queue = asyncio.Queue(maxsize=self.settings.room_queue_maxsize)
+            runtime.album_queue = asyncio.Queue(maxsize=self.settings.room_queue_maxsize)
+            runtime.admin_feed_queue = asyncio.Queue(maxsize=self.settings.room_queue_maxsize)
             self.registry[bot_id] = runtime
+            await self.repositories.bots.mark_starting(bot_id)
+
             try:
                 me = await bot.get_me()
                 if int(me.id) != bot_id:
-                    raise ValueError("El token ya no corresponde al bot almacenado")
-                ctx = runtime.build_context(self.mongo.db, self.settings, None, self.repositories)
-                from app.bot.child_factory import build_child_services
-                build_child_services(ctx)
-                dp.include_router(build_router(ctx))
-                if self.settings.mode == "webhook":
+                    raise RuntimeError("El token almacenado ya no corresponde con el bot registrado")
+                runtime.info.username = me.username
+                runtime.ctx = runtime.build_context(self.mongo.db, self.settings, self.repositories, None)
+                build_child_services(runtime.ctx)
+                dispatcher.include_router(build_child_router(runtime.ctx))
+
+                if self.settings.environment == "production" or self.settings.mode == "webhook":
                     url = f"{self.settings.webhook_base_url}/telegram/webhook/{bot_id}"
-                    await self._set_and_verify_webhook(
-                        bot,
-                        url=url,
-                        secret_token=secret,
-                        allowed_updates=dp.resolve_used_update_types(),
-                        label=f"child:{bot_id}",
-                    )
-                    runtime.status = BotStatus.RUNNING
+                    await self.configure_webhook(bot, url, secret, f"child:{bot_id}", dispatcher)
                 else:
-                    runtime.status = BotStatus.RUNNING
-                    runtime.polling_task = runtime.add_task(dp.start_polling(bot, handle_signals=False))
-                runtime.started_at = datetime.now(timezone.utc)
+                    runtime.add_task(dispatcher.start_polling(bot, handle_signals=False), f"child-polling:{bot_id}")
+
+                runtime.status = BotStatus.RUNNING
+                runtime.started_at = utcnow()
                 runtime.restart_count = info.restart_count
-                runtime.broadcast_queue = asyncio.Queue(maxsize=self.settings.room_queue_maxsize)
-                runtime.album_queue = asyncio.Queue(maxsize=self.settings.room_queue_maxsize)
-                runtime.admin_feed_queue = asyncio.Queue(maxsize=self.settings.room_queue_maxsize)
-                for _ in range(self.settings.broadcast_workers_per_bot):
-                    runtime.add_task(self._broadcast_worker(runtime))
-                    runtime.add_task(self._album_worker(runtime))
-                for _ in range(max(1, min(2, self.settings.broadcast_workers_per_bot))):
-                    runtime.add_task(self._admin_feed_worker(runtime))
-                await self.repositories.bots.mark_started(bot_id)
-                runtime.add_task(self._heartbeat_loop(runtime))
-                runtime.add_task(self._replay_pending_updates(bot_id))
+                await self.repositories.bots.mark_running(bot_id)
+
+                for index in range(self.settings.broadcast_workers_per_bot):
+                    runtime.add_task(self._broadcast_worker(runtime), f"broadcast:{bot_id}:{index}")
+                runtime.add_task(self._album_worker(runtime), f"album:{bot_id}")
+                runtime.add_task(self._admin_feed_worker(runtime), f"admin-feed:{bot_id}")
+                runtime.add_task(self._heartbeat_loop(runtime), f"heartbeat:{bot_id}")
+                runtime.add_task(self._replay_pending_updates(bot_id), f"replay:{bot_id}")
                 self.logger.info("child_bot_running bot_id=%s username=@%s", bot_id, me.username)
                 return f"bot {bot_id} RUNNING"
             except Exception as exc:
                 runtime.status = BotStatus.ERROR
                 runtime.last_error = str(exc)[:1000]
                 await self.repositories.bots.update_status(bot_id, BotStatus.ERROR.value, runtime.last_error)
-                await bot.session.close()
+                await runtime.stop()
                 self.registry.pop(bot_id, None)
-                self.logger.exception("child_bot_start_failed bot_id=%s", bot_id)
                 raise
 
     async def stop_bot(self, bot_id: int) -> str:
@@ -236,111 +196,75 @@ class BotManager:
             await self.repositories.bots.update_status(bot_id, BotStatus.STOPPED.value)
             return f"bot {bot_id} STOPPED"
         runtime.status = BotStatus.STOPPING
-        if self.settings.mode == "webhook":
+        if self.settings.environment == "production" or self.settings.mode == "webhook":
             try:
                 await runtime.bot.delete_webhook(drop_pending_updates=False)
             except TelegramAPIError:
-                self.logger.exception("delete_webhook_failed bot_id=%s", bot_id)
+                self.logger.exception("child_delete_webhook_failed bot_id=%s", bot_id)
         await runtime.stop()
         self.registry.pop(bot_id, None)
         await self.repositories.bots.update_status(bot_id, BotStatus.STOPPED.value)
         return f"bot {bot_id} STOPPED"
 
-    async def restart_bot(self, bot_id: int) -> str:
+    async def restart_bot(self, bot_id: int, reason: str = "manual") -> str:
         now = time.monotonic()
-        dq = self._failure_times[bot_id]
-        dq.append(now)
-        while dq and now - dq[0] > self.settings.restart_window_seconds:
-            dq.popleft()
-        if len(dq) > self.settings.max_restarts_per_window:
-            await self.repositories.bots.update_status(bot_id, BotStatus.ERROR.value, "circuit breaker: demasiados reinicios")
-            raise RuntimeError("Circuit breaker activado")
+        history = self.restart_history[bot_id]
+        history.append(now)
+        while history and now - history[0] > self.settings.restart_window_seconds:
+            history.popleft()
+        if len(history) > self.settings.max_restarts_per_window:
+            await self.repositories.bots.update_status(bot_id, BotStatus.ERROR.value, "Circuit breaker: demasiados reinicios")
+            raise RuntimeError("Circuit breaker activado para este bot")
+        await self.repositories.bots.update_status(bot_id, BotStatus.RESTARTING.value, f"restart:{reason}")
         await self.stop_bot(bot_id)
-        delay = backoff_delay(len(dq) - 1, self.settings.max_restart_delay_seconds)
-        await asyncio.sleep(delay)
+        await asyncio.sleep(min(self.settings.max_restart_delay_seconds, max(1, len(history) - 1)))
         await self.repositories.bots.increment_restart(bot_id)
         return await self.start_bot(bot_id)
 
-    async def bot_enable(self, bot_id: int) -> str:
-        await self.repositories.bots.set_enabled(bot_id, True)
-        return await self.start_bot(bot_id)
-
-    async def bot_disable(self, bot_id: int) -> str:
-        await self.repositories.bots.set_enabled(bot_id, False)
-        return await self.stop_bot(bot_id)
-
-    async def bot_delete(self, bot_id: int) -> str:
-        await self.stop_bot(bot_id)
-        await self.repositories.bots.delete(bot_id)
-        return f"bot {bot_id} eliminado"
-
-    async def get_info(self, bot_id: int) -> BotInfo:
-        doc = await self.repositories.bots.get(bot_id)
-        if not doc:
-            raise BotNotFoundError(str(bot_id))
-        return BotInfo.from_document(doc)
-
-    def format_bot_info(self, info: BotInfo) -> str:
-        runtime = self.registry.get(info.bot_id)
-        queue = runtime.broadcast_queue.qsize() if runtime and runtime.broadcast_queue else 0
-        return f"<b>{info.bot_id}</b> @{info.username}\nowner={info.owner_id}\nstatus={runtime.status if runtime else info.status}\nrestarts={info.restart_count}\nqueue={queue}\nheartbeat={info.last_heartbeat}"
+    async def handle_master_webhook_update(self, payload: dict) -> None:
+        if not self.ready:
+            raise RuntimeError("Master todavía no está listo")
+        update_id = payload.get("update_id")
+        self.logger.info("master_webhook_dispatch update_id=%s", update_id)
+        result = await self.master_dp.feed_raw_update(self.master_bot, payload)
+        self.logger.info("master_dispatch_result update_id=%s result_type=%s", update_id, type(result).__name__)
 
     async def handle_webhook_update(self, bot_id: int, payload: dict) -> None:
         runtime = self.registry.get(bot_id)
-        if not runtime:
-            await self.start_bot(bot_id)
+        if runtime is None:
+            try:
+                await self.start_bot(bot_id)
+            except Exception:
+                self.logger.exception("webhook_runtime_start_failed bot_id=%s", bot_id)
+                raise
             runtime = self.registry.get(bot_id)
         if not runtime or runtime.status != BotStatus.RUNNING:
-            return
-        update_id = int(payload.get("update_id", 0))
+            raise RuntimeError(f"Bot {bot_id} no está RUNNING")
+        update_id = payload.get("update_id")
+        self.logger.info("webhook_dispatch bot_id=%s update_id=%s", bot_id, update_id)
         try:
-            await runtime.dispatcher.feed_raw_update(runtime.bot, payload)
-            runtime.metrics.inc("updates_total")
-            if update_id:
-                runtime.metrics.set("last_update_id", update_id)
-                await self.repositories.media.mark_update(bot_id, update_id, "PROCESSED")
+            result = await runtime.dispatcher.feed_raw_update(runtime.bot, payload)
+            runtime.last_update_at = utcnow()
+            self.logger.info("webhook_dispatch_result bot_id=%s update_id=%s result_type=%s", bot_id, update_id, type(result).__name__)
+            if update_id is not None:
+                runtime.last_update_at = utcnow()
+                await self.repositories.media.mark_update(bot_id, int(update_id), "PROCESSED")
         except Exception:
-            if update_id:
-                await self.repositories.media.mark_update(bot_id, update_id, "FAILED")
+            if update_id is not None:
+                await self.repositories.media.mark_update(bot_id, int(update_id), "FAILED")
+            self.logger.exception("webhook_dispatch_failed bot_id=%s update_id=%s", bot_id, update_id)
             raise
 
     async def _replay_pending_updates(self, bot_id: int) -> None:
-        pending = await self.repositories.media.pending_updates(bot_id, 500)
-        if pending:
-            self.logger.info("replaying_pending_updates bot_id=%s count=%s", bot_id, len(pending))
+        pending = await self.repositories.media.pending_updates(bot_id, 200)
+        if not pending:
+            return
+        self.logger.info("replaying_pending_updates bot_id=%s count=%s", bot_id, len(pending))
         for item in pending:
             try:
                 await self.handle_webhook_update(bot_id, item["payload"])
             except Exception:
                 self.logger.exception("pending_update_replay_failed bot_id=%s update_id=%s", bot_id, item.get("update_id"))
-
-    async def _supervisor_loop(self) -> None:
-        while not self.shutting_down:
-            await asyncio.sleep(10)
-            try:
-                docs = await self.repositories.bots.list_enabled()
-                now = datetime.now(timezone.utc)
-                for doc in docs:
-                    bot_id = int(doc["bot_id"])
-                    runtime = self.registry.get(bot_id)
-                    if runtime is None and doc.get("status") == BotStatus.RUNNING.value:
-                        try:
-                            await self.start_bot(bot_id)
-                        except Exception:
-                            self.logger.exception("supervisor_start_failed bot_id=%s", bot_id)
-                        continue
-                    if runtime and runtime.status == BotStatus.RUNNING:
-                        heartbeat = ensure_utc(doc.get("last_heartbeat"))
-                        if heartbeat and (now - heartbeat).total_seconds() > self.settings.heartbeat_interval_seconds * 3:
-                            self.logger.warning("stale_heartbeat bot_id=%s", bot_id)
-                            try:
-                                await self.restart_bot(bot_id)
-                            except Exception:
-                                self.logger.exception("supervisor_restart_failed bot_id=%s", bot_id)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                self.logger.exception("supervisor_loop_error")
 
     async def _broadcast_worker(self, runtime: BotRuntime) -> None:
         assert runtime.broadcast_queue is not None
@@ -351,7 +275,7 @@ class BotManager:
             except asyncio.CancelledError:
                 raise
             except Exception:
-                runtime.logger.exception("broadcast_worker_failed bot_id=%s", runtime.info.bot_id)
+                runtime.logger.exception("broadcast_worker_failed")
             finally:
                 runtime.broadcast_queue.task_done()
 
@@ -364,39 +288,36 @@ class BotManager:
             except asyncio.CancelledError:
                 raise
             except Exception:
-                runtime.logger.exception("album_worker_failed bot_id=%s", runtime.info.bot_id)
+                runtime.logger.exception("album_worker_failed")
             finally:
                 runtime.album_queue.task_done()
 
     async def _admin_feed_worker(self, runtime: BotRuntime) -> None:
         assert runtime.admin_feed_queue is not None
         while not runtime.stop_event.is_set():
-            job = await runtime.admin_feed_queue.get()
+            item = await runtime.admin_feed_queue.get()
             try:
-                await runtime.ctx.services.admin_feed.process(job)
+                await runtime.ctx.services.admin_feed.process(item)
             except asyncio.CancelledError:
                 raise
             except Exception:
-                runtime.logger.exception("admin_feed_worker_failed bot_id=%s", runtime.info.bot_id)
+                runtime.logger.exception("admin_feed_worker_failed")
             finally:
                 runtime.admin_feed_queue.task_done()
 
     async def notify_admins_new_bot(self, info: BotInfo, creator_id: int) -> None:
-        name = f"@{info.username}" if info.username else str(info.bot_id)
         text = (
             "<b>🚀 NUEVO BOT REGISTRADO</b>\n\n"
-            f"🤖 <b>{name}</b>\n"
+            f"🤖 @{info.username or info.bot_id}\n"
             f"🆔 <code>{info.bot_id}</code>\n"
             f"👤 Creador: <code>{creator_id}</code>\n"
-            "🟢 Estado: <b>RUNNING</b>\n\n"
-            "El bot hijo fue validado, configurado y activado correctamente."
+            "🟢 Estado: <b>RUNNING</b>"
         )
-        from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
         rows = []
         if info.username:
             rows.append([InlineKeyboardButton(text="🤖 Abrir bot", url=f"https://t.me/{info.username}")])
         rows.append([
-            InlineKeyboardButton(text="📊 Ver estado", callback_data=f"master:botinfo:{info.bot_id}"),
+            InlineKeyboardButton(text="📊 Estado", callback_data=f"master:botinfo:{info.bot_id}"),
             InlineKeyboardButton(text="🔄 Reiniciar", callback_data=f"master:restart:{info.bot_id}"),
         ])
         markup = InlineKeyboardMarkup(inline_keyboard=rows)
@@ -404,46 +325,84 @@ class BotManager:
             try:
                 await self.master_bot.send_message(admin_id, text, reply_markup=markup)
             except Exception:
-                self.logger.exception("admin_notification_failed admin_id=%s bot_id=%s", admin_id, info.bot_id)
-
-    async def _room_cleanup_loop(self) -> None:
-        while not self.shutting_down:
-            await asyncio.sleep(60)
-            try:
-                expired = await self.repositories.room.expire_due()
-                if expired:
-                    self.logger.info("rooms_expired count=%s", expired)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                self.logger.exception("room_cleanup_loop_error")
+                self.logger.exception("admin_notification_failed admin_id=%s", admin_id)
 
     async def _heartbeat_loop(self, runtime: BotRuntime) -> None:
         while not self.shutting_down and runtime.status == BotStatus.RUNNING:
-            await asyncio.sleep(self.settings.heartbeat_interval_seconds)
-            await self.repositories.bots.heartbeat(runtime.info.bot_id)
-            runtime.metrics.set("runtime_tasks", runtime.task_registry.count if runtime.task_registry else 0)
+            try:
+                await asyncio.sleep(self.settings.heartbeat_interval_seconds)
+                if runtime.status != BotStatus.RUNNING:
+                    break
+                await self.repositories.bots.heartbeat(runtime.info.bot_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                runtime.logger.exception("heartbeat_failed")
+
+    async def _supervisor_loop(self) -> None:
+        while not self.shutting_down:
+            await asyncio.sleep(self.settings.supervisor_interval_seconds)
+            try:
+                docs = await self.repositories.bots.list_enabled()
+                now = utcnow()
+                for doc in docs:
+                    bot_id = int(doc["bot_id"])
+                    runtime = self.registry.get(bot_id)
+                    if runtime is None:
+                        if doc.get("status") in {BotStatus.RUNNING.value, BotStatus.STARTING.value}:
+                            try:
+                                await self.start_bot(bot_id)
+                            except Exception:
+                                self.logger.exception("supervisor_start_failed bot_id=%s", bot_id)
+                        continue
+
+                    if runtime.status != BotStatus.RUNNING:
+                        continue
+                    heartbeat = doc.get("last_heartbeat")
+                    age = age_seconds(heartbeat, now)
+                    if age is not None and age > self.settings.heartbeat_interval_seconds * self.settings.heartbeat_grace_multiplier:
+                        self.logger.warning("supervisor_stale_heartbeat bot_id=%s age=%.1fs", bot_id, age)
+                        try:
+                            await self.restart_bot(bot_id, reason="stale_heartbeat")
+                        except Exception:
+                            self.logger.exception("supervisor_restart_failed bot_id=%s", bot_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self.logger.exception("supervisor_loop_error")
+
+    async def _room_cleanup_loop(self) -> None:
+        while not self.shutting_down:
+            try:
+                await asyncio.sleep(60)
+                changed = await self.repositories.room.expire_due()
+                if changed:
+                    self.logger.info("rooms_expired count=%s", changed)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self.logger.exception("room_cleanup_failed")
 
     async def shutdown(self) -> None:
         self.shutting_down = True
-        if self.supervisor_task:
-            self.supervisor_task.cancel()
-            await asyncio.gather(self.supervisor_task, return_exceptions=True)
-        if self.room_cleanup_task:
-            self.room_cleanup_task.cancel()
-            await asyncio.gather(self.room_cleanup_task, return_exceptions=True)
-        bots = list(self.registry)
-        for bot_id in bots:
+        self.ready = False
+        await self.system_tasks.cancel_all()
+        for bot_id in list(self.registry.keys()):
             try:
                 await self.stop_bot(bot_id)
             except Exception:
                 self.logger.exception("child_shutdown_failed bot_id=%s", bot_id)
-        if self.settings.mode == "webhook":
-            try:
+        try:
+            if self.settings.environment == "production" or self.settings.mode == "webhook":
                 await self.master_bot.delete_webhook(drop_pending_updates=False)
-            except TelegramAPIError:
-                self.logger.exception("master_delete_webhook_failed")
-        if hasattr(self, "master_dp_task"):
-            self.master_dp_task.cancel()
-            await asyncio.gather(self.master_dp_task, return_exceptions=True)
-        await self.master_bot.session.close()
+        except Exception:
+            self.logger.exception("master_delete_webhook_failed")
+        try:
+            await self.master_bot.session.close()
+        except Exception:
+            self.logger.exception("master_session_close_failed")
+
+    async def get_health(self) -> dict:
+        running = sum(1 for runtime in self.registry.values() if runtime.status == BotStatus.RUNNING)
+        errors = sum(1 for runtime in self.registry.values() if runtime.status == BotStatus.ERROR)
+        return {"ready": self.ready, "children": len(self.registry), "children_running": running, "children_error": errors}

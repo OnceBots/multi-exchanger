@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import logging
-
-from pymongo import AsyncMongoClient
-from bson.codec_options import CodecOptions
 from datetime import timezone
+
+from bson.codec_options import CodecOptions
+from pymongo import AsyncMongoClient
 from pymongo.errors import PyMongoError
 from pymongo.server_api import ServerApi
 
@@ -15,6 +15,7 @@ class MongoManager:
         self.logger = logging.getLogger("mongo")
         self.client: AsyncMongoClient | None = None
         self.db = None
+        self.codec_options = CodecOptions(tz_aware=True, tzinfo=timezone.utc)
 
     async def connect(self) -> None:
         self.client = AsyncMongoClient(
@@ -28,10 +29,8 @@ class MongoManager:
             retryWrites=True,
             retryReads=True,
         )
-        self.db = self.client[self.settings.db_name].with_options(
-            codec_options=CodecOptions(tz_aware=True, tzinfo=timezone.utc)
-        )
-        await self.ping()
+        self.db = self.client[self.settings.db_name]
+        await self.client.admin.command("ping")
         self.logger.info("mongodb_connected")
 
     async def ping(self) -> bool:
@@ -46,7 +45,7 @@ class MongoManager:
 
     async def close(self) -> None:
         if self.client is not None:
-            await self.client.close()
+            self.client.close()
             self.client = None
             self.db = None
             self.logger.info("mongodb_closed")
@@ -54,4 +53,4 @@ class MongoManager:
     def collection(self, name: str):
         if self.db is None:
             raise RuntimeError("MongoDB no está inicializado")
-        return self.db[name]
+        return self.db.get_collection(name, codec_options=self.codec_options)

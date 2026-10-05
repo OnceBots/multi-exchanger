@@ -1,13 +1,14 @@
 install:
 	python -m pip install -r requirements.txt
 
-lint:
-	ruff check app tests
+run:
+	python -m app.main
 
 test:
-	pytest -q
+	python -m pytest -q
 
-check:
+compile:
 	python -m compileall -q app tests
+
+lint:
 	ruff check app tests
-	pytest -q

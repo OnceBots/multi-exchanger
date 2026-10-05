@@ -3,10 +3,13 @@ from __future__ import annotations
 import secrets
 
 from aiogram import Bot
-from aiogram.exceptions import TelegramBadRequest, TelegramNetworkError, TelegramUnauthorizedError
+from aiogram.exceptions import TelegramNetworkError, TelegramUnauthorizedError
 
 from app.core.crypto import SecretBox
-from app.core.exceptions import InvalidBotTokenError
+
+
+class InvalidBotTokenError(ValueError):
+    pass
 
 
 class TokenService:
@@ -16,17 +19,20 @@ class TokenService:
 
     @staticmethod
     def validate_format(token: str) -> None:
-        if ":" not in token or len(token) < 30:
-            raise InvalidBotTokenError("Formato de token inválido")
+        value = token.strip()
+        if ":" not in value or len(value) < 30:
+            raise InvalidBotTokenError("El token no tiene un formato válido.")
 
-    async def validate_token(self, token: str) -> tuple[int, str]:
+    async def validate_token(self, token: str) -> tuple[int, str, str]:
         self.validate_format(token)
-        bot = Bot(token=token)
+        bot = Bot(token=token.strip())
         try:
             me = await bot.get_me()
-            return int(me.id), me.username or ""
-        except (TelegramBadRequest, TelegramUnauthorizedError, TelegramNetworkError) as exc:
-            raise InvalidBotTokenError("Telegram rechazó el token o no respondió") from exc
+            return int(me.id), me.username or "", me.first_name or "Bot"
+        except (TelegramUnauthorizedError, TelegramNetworkError) as exc:
+            raise InvalidBotTokenError("Telegram no pudo validar el token.") from exc
+        except Exception as exc:
+            raise InvalidBotTokenError("El token fue rechazado por Telegram.") from exc
         finally:
             await bot.session.close()
 

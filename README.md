@@ -1,305 +1,141 @@
-## Privacy and moderation
+# Telegram Multi-Bot Platform — Rebuild
 
-Child bots should disclose to users that content may be reviewed by platform administrators for moderation, security, and compliance. The platform must not present administrative review as a secret feature. The admin reception channel is intended as a moderation/safety control and can be enabled or disabled by authorized administrators.
+Plataforma SaaS de Telegram con **MASTER + bots hijos**, un único servidor HTTP, MongoDB compartido y un webhook independiente por bot.
 
-# Telegram Multi-Bot Platform — Master + Child Bots + Rooms + Admin Feed
-
-Plataforma modular para ejecutar un **BOT MASTER** y una cantidad creciente de **BOTS HIJOS** usando un único core, tenants aislados por `bot_id`, Webhooks, MongoDB Async, Mini App y workers de multimedia.
-
-La versión actual incorpora dos vías independientes dentro de cada Child Bot:
-
-1. **Sistema de salas**: comunidades públicas/privadas, miembros, moderación, permisos, expiración y multimedia anónima.
-2. **Admin Feed directo**: cualquier `ADMIN_ID` que entre una vez al Child Bot activa automáticamente su suscripción y recibe el contenido que llegue directamente al bot, sin entrar a ninguna sala.
-
-## Experiencia Master
-
-### Usuario normal
-
-`/start` muestra una interfaz limpia con:
-
-- `➕ Crear mi bot`
-- `🤖 Mis bots`
-- `📖 Cómo funciona`
-
-Cualquier usuario puede registrar un Child Bot pegando un token válido de BotFather. No se requiere estar en `ADMIN_IDS` para crear el bot.
-
-### Administradores
-
-Los usuarios de `ADMIN_IDS` reciben el panel:
-
-- `🤖 Gestionar bots`
-- `➕ Crear bot`
-- `❤️ Salud`
-- `📊 Estadísticas`
-- `📖 Guía`
-
-Cada vez que un usuario crea un nuevo bot, los `ADMIN_IDS` reciben una notificación automática con:
-
-- bot / username
-- `bot_id`
-- creador
-- estado
-- botón para abrir el bot
-- botón para ver estado
-- botón para reiniciar
-
-> Para que Telegram permita al Master iniciar conversaciones con un administrador, cada `ADMIN_ID` debe haber abierto el Master al menos una vez.
-
-## Admin Feed en Child Bots
-
-Cuando un administrador entra al Child Bot y usa `/start`:
-
-- se activa `admin_feeds` en MongoDB;
-- la suscripción sobrevive a los reinicios;
-- el administrador puede recibir multimedia y contenido directo;
-- no necesita crear ni unirse a una sala;
-- los mensajes que el propio administrador envía no se reenvían de vuelta al mismo administrador.
-
-Soporta:
-
-- fotos
-- vídeos
-- documentos
-- animaciones
-- álbumes
-- texto directo no-comando
-
-Los álbumes del feed administrativo se mantienen agrupados cuando Telegram lo permite.
-
-## Child Bot — Interfaz de chat
-
-El menú principal es visual y basado en botones:
-
-- `🌎 Explorar salas`
-- `🏠 Mis salas`
-- `➕ Crear sala`
-- `🚪 Unirme`
-- `📱 Abrir Mini App`
-- `👤 Mi perfil`
-- `📖 Manual`
-- para admins: `🛰 Feed admin: ACTIVO`
-
-La interfaz evita mostrar una lista grande de comandos al usuario.
-
-## Salas
-
-Cada sala pertenece a un único tenant (`bot_id`) y puede ser:
-
-- pública
-- privada
-- activa
-- pausada
-- expirada
-- cerrada
-
-Cada sala admite:
-
-- nombre y descripción
-- capacidad
-- expiración
-- fotos
-- vídeos
-- archivos
-- álbumes
-- anonimato de identidad
-- owner/admin/member
-- selección de sala activa
-- código de invitación
-- deep link `/start join_<codigo>`
-
-### Moderación
-
-Los owners/admins pueden:
-
-- ver miembros
-- silenciar / activar sonido
-- bloquear / desbloquear
-- expulsar
-- pausar
-- reanudar
-- cerrar
-- editar nombre
-- editar descripción
-- modificar permisos multimedia
-- renovar expiración
-
-Un `ADMIN_ID` global puede moderar cualquier sala.
-
-## Mini App
-
-La Mini App se diseñó mobile-first, con soporte del tema de Telegram y safe areas.
-
-Incluye:
-
-- Inicio
-- Explorar salas públicas
-- Mis salas
-- Crear sala
-- Perfil
-- Idioma
-- detalle de sala
-- unirse / salir
-- compartir
-- gestión de sala
-- gestión de miembros
-- permisos multimedia
-- pausa / reanudación / cierre
-- edición de sala
-- expiración
-- feedback tipo toast
-- estados vacíos
-- skeleton loading
-- bottom navigation
-- paneles modales tipo bottom-sheet
-
-La autenticación se realiza con `Telegram.WebApp.initData`; el backend no confía en un `user_id` enviado por query string.
+Este repositorio es un **rebuild limpio**. No es un parche incremental del código anterior. Se conserva la funcionalidad principal solicitada: creación pública de bots hijos, aislamiento por `bot_id`, webhooks, salas, membresías, multimedia, álbumes, colas, reintentos, supervisor, Mini App y administración.
 
 ## Arquitectura
 
 ```text
-BOT MASTER
-   │
-   ├── BotManager
-   ├── BotRegistry
-   ├── BotRuntime
-   └── Control Plane
-          │
-          ├── Child A ── Admin Feed + Rooms
-          ├── Child B ── Admin Feed + Rooms
-          └── Child N ── Admin Feed + Rooms
+Telegram
+  │
+  ├── /telegram/webhook/master ──────► Master Dispatcher
+  │                                      │
+  │                                      └── BotManager
+  │                                           ├── Child #1 Runtime
+  │                                           ├── Child #2 Runtime
+  │                                           └── Child #N Runtime
+  │
+  └── /telegram/webhook/{bot_id} ─────► Child Dispatcher
 
-MongoDB
-   ├── bots
-   ├── users
-   ├── rooms
-   ├── room_members
-   ├── admin_feeds
-   ├── media_events
-   ├── media_groups
-   ├── broadcast_jobs
-   ├── broadcast_deliveries
-   ├── sessions
-   ├── audit_logs
-   └── inbound_updates
+FastAPI / Uvicorn
+        │
+        └── MongoDB Atlas (PyMongo Async)
 ```
 
-Todos los bots hijos comparten el código del core. No se crean carpetas `bot1/`, `bot2/`, etc.
+Cada child tiene su propio `Bot`, `Dispatcher`, colas, workers, heartbeat y secreto de webhook. No se levanta un servidor HTTP por bot y no se usa polling en producción.
+
+## Flujo de creación de bot
+
+1. Usuario entra al Master.
+2. Pulsa **Crear mi bot** o usa `/add_bot`.
+3. Se valida el token con `getMe`.
+4. Se comprueba que el `bot_id` no exista.
+5. Token y secreto de webhook se cifran con Fernet.
+6. Se persiste el tenant.
+7. Se crea el runtime.
+8. Se configura el webhook `https://host/telegram/webhook/{bot_id}`.
+9. Se inicia el worker pool y heartbeat.
+10. Los administradores reciben una notificación del nuevo bot.
 
 ## Webhooks
 
-En producción el proyecto utiliza Webhooks.
+La plataforma verifica el `X-Telegram-Bot-Api-Secret-Token` antes de pasar el update a aiogram. El update se entrega mediante `Dispatcher.feed_raw_update()`, la API documentada por aiogram para aceptar un `dict` bruto. El request espera al dispatcher y cualquier excepción queda visible en Render en lugar de perderse dentro de una task anónima.
+
+## Fechas y MongoDB
+
+Todas las fechas propias de la plataforma se generan con `datetime.now(timezone.utc)`. El cliente MongoDB usa `CodecOptions(tz_aware=True, tzinfo=UTC)` para leer fechas como timezone-aware. Además existe una función de normalización para datos antiguos guardados como naive.
+
+Esto evita el error que había aparecido en el supervisor:
 
 ```text
-POST /telegram/webhook/master
-POST /telegram/webhook/{bot_id}
+TypeError: can't subtract offset-naive and offset-aware datetimes
 ```
 
-Cada Child Bot tiene su propio `secret_token` cifrado.
+## Multimedia
 
-Telegram permite establecer un `secret_token` en `setWebhook` y lo envía como `X-Telegram-Bot-Api-Secret-Token`; el proyecto valida ese header antes de aceptar el update. citeturn579914search0turn579914search6
+- foto
+- vídeo
+- documento
+- GIF/animation
+- álbumes de fotos/vídeos con debounce
+- captions
+- distribución anónima
+- exclusión del emisor
+- cola acotada
+- workers
+- concurrencia limitada
+- `RetryAfter`
+- reintentos
+- idempotencia de updates/eventos
 
-## MongoDB
+Los álbumes se agregan en MongoDB durante una pequeña ventana de debounce y se entregan como un único álbum cuando Telegram lo permite.
 
-El proyecto utiliza `AsyncMongoClient` de PyMongo y no Motor. La documentación actual de MongoDB presenta `AsyncMongoClient` como la API asíncrona oficial y documenta el uso con Atlas y Stable API. citeturn787179search0turn787179search5turn787179search8
+## Moderación
 
-## Configuración
+El sistema dispone de un **feed de moderación para `ADMIN_IDS`**. El producto muestra una advertencia de privacidad general indicando que el contenido puede procesarse para seguridad/moderación. La función es configurable por administrador.
 
-Copia:
+## Mini App
 
-```powershell
-copy .env.example .env
+- `/master-app` — creación de bots hijos.
+- `/app?bot_id=...` — vista de salas del bot hijo.
+- Validación de `Telegram.WebApp.initData`.
+- Diseño mobile-first.
+
+## Variables de entorno
+
+Copia `.env.example` como `.env` en local. En Render, configura las mismas variables desde Environment.
+
+No subas `.env` al repositorio.
+
+## Render
+
+Render debe ejecutar el Dockerfile. El servicio expone `${PORT}` (por defecto `10000`).
+
+Health check:
+
+```text
+GET /health
 ```
 
-Variables principales:
+Readiness real:
 
-```env
-MASTER_BOT_TOKEN=
-MONGO_URI=
-DB_NAME=telegram_multibot
-WEBHOOK_BASE_URL=https://tu-servicio.onrender.com
-MASTER_WEBHOOK_PATH=/telegram/webhook/master
-WEBHOOK_SECRET=
-APP_BASE_URL=https://tu-servicio.onrender.com
-ADMIN_IDS=123456789,987654321
-BOT_TOKEN_ENCRYPTION_KEY=
+```text
+GET /ready
 ```
 
-### Generar `BOT_TOKEN_ENCRYPTION_KEY`
+URL de webhook del Master:
 
-```powershell
-python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```text
+https://TU_DOMINIO/telegram/webhook/master
 ```
 
-No publiques:
+URLs de child:
 
-- `MASTER_BOT_TOKEN`
-- tokens de Child Bots
-- `MONGO_URI`
-- `WEBHOOK_SECRET`
-- `BOT_TOKEN_ENCRYPTION_KEY`
+```text
+https://TU_DOMINIO/telegram/webhook/BOT_ID
+```
 
-## Ejecución local en Windows
-
-El proyecto requiere Python 3.12+; Python 3.13 también es válido.
+## Local
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-copy .env.example .env
+pip install -r requirements.txt
 python -m app.main
 ```
 
-Para desarrollo se puede utilizar `MODE=polling`. En producción `MODE=webhook` es obligatorio.
-
-## Render
-
-**Build Command:** Docker
-
-**Start Command:**
-
-```text
-python -m uvicorn app.main:app --host 0.0.0.0 --port $PORT
-```
-
-**Health Check Path:**
-
-```text
-/health
-```
-
-## UptimeRobot
-
-Usa un monitor HTTP(S) sobre:
-
-```text
-https://TU-DOMINIO/health
-```
-
-No utilices el endpoint real de Telegram como monitor.
-
-## Pruebas y validación
-
-Antes del despliegue:
+## Tests y comprobaciones
 
 ```powershell
 python -m compileall -q app tests
-pytest -q
+python -m pytest -q
 ```
 
-El entorno de CI ejecuta lint, compilación y pruebas.
+## Nota sobre pruebas de integración
 
-## Diseño de escalabilidad
+Las pruebas que requieren Telegram real o MongoDB real deben ejecutarse con credenciales de entorno y servicios disponibles. Este repositorio no afirma haber realizado pruebas externas contra Telegram desde el entorno de generación.
 
-El proceso inicial puede alojar Master y Child Runtimes en una sola instancia. Redis queda preparado para coordinación futura y locks distribuidos. La arquitectura no promete una cantidad fija de bots: la capacidad real depende del volumen de updates, fan-out, salas, MongoDB, Telegram y recursos de Render.
+## Despliegue limpio
 
-## Nota importante sobre el Admin Feed
-
-`ADMIN_IDS` no significa que el administrador reciba automáticamente el contenido de todos los Child Bots desde el momento de creación. La regla implementada es:
-
-1. el bot se crea;
-2. los `ADMIN_IDS` reciben la notificación del nuevo bot en el Master;
-3. un administrador abre el Child Bot;
-4. `/start` activa su `admin_feed` persistente;
-5. desde ese momento recibe el contenido directo del bot sin necesidad de entrar a una sala.
+Consulta `DEPLOY_CLEAN_REBUILD.md` antes de reemplazar el contenido de un repositorio existente. Esta versión debe desplegarse como un conjunto completo; no combines módulos de releases anteriores.

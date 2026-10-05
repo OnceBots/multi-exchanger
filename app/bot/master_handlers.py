@@ -1,148 +1,104 @@
 from __future__ import annotations
 
-import asyncio
-
 import html
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, WebAppInfo
 
+from app.services.token_service import InvalidBotTokenError
+
 
 def build_master_router(manager) -> Router:
     router = Router(name="master")
 
-    def is_admin(message: Message) -> bool:
-        return bool(message.from_user and int(message.from_user.id) in manager.settings.admin_ids)
+    def is_admin(user_id: int) -> bool:
+        return user_id in manager.settings.admin_ids
 
-    def create_webapp_button() -> InlineKeyboardButton:
-        url = f"{manager.settings.app_base_url.rstrip('/')}/master-app"
-        return InlineKeyboardButton(text="➕ Crear mi bot", web_app=WebAppInfo(url=url))
-
-    def master_public_kb() -> InlineKeyboardMarkup:
-        return InlineKeyboardMarkup(inline_keyboard=[
-            [create_webapp_button()],
+    def menu(user_id: int) -> InlineKeyboardMarkup:
+        rows = [
+            [InlineKeyboardButton(text="➕ Crear mi bot", web_app=WebAppInfo(url=f"{manager.settings.app_base_url}/master-app"))],
             [InlineKeyboardButton(text="🤖 Mis bots", callback_data="master:mine"), InlineKeyboardButton(text="📖 Cómo funciona", callback_data="master:how")],
-        ])
+        ]
+        if is_admin(user_id):
+            rows.append([InlineKeyboardButton(text="🛡️ Administración", callback_data="master:list")])
+        return InlineKeyboardMarkup(inline_keyboard=rows)
 
-    def admin_kb() -> InlineKeyboardMarkup:
-        return InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🤖 Gestionar bots", callback_data="master:list"), create_webapp_button()],
-            [InlineKeyboardButton(text="❤️ Salud", callback_data="master:health"), InlineKeyboardButton(text="📊 Estadísticas", callback_data="master:stats")],
-            [InlineKeyboardButton(text="📖 Guía", callback_data="master:how")],
-        ])
-
-    async def begin_create(message: Message, user_id: int | None = None) -> None:
-        actor_id = int(user_id if user_id is not None else message.from_user.id)
-        await manager.repositories.session.set(0, actor_id, "master_token", {})
-        await message.answer(
-            "<b>➕ CREAR BOT HIJO</b>\n"
-            "<i>Configuración rápida y segura</i>\n\n"
-            "<b>1.</b> Abre <code>@BotFather</code> y crea tu bot.\n"
-            "<b>2.</b> Copia su <b>token</b>.\n"
-            "<b>3.</b> Pégalo aquí para validarlo.\n\n"
-            "🔐 El token se valida y se almacena cifrado.\n"
-            "⚡ Tras una validación correcta, el bot se activa automáticamente.\n\n"
-            "<i>Por seguridad, elimina el mensaje del token después de enviarlo.</i>"
+    async def begin_create(target: Message, user_id: int) -> None:
+        await manager.repositories.session.set(0, user_id, "create_child_token", {})
+        await target.answer(
+            "<b>➕ CREAR BOT HIJO</b>\n\n"
+            "1️⃣ Crea un bot con <code>@BotFather</code>.\n"
+            "2️⃣ Envía aquí el token.\n"
+            "3️⃣ Lo validaremos con Telegram.\n"
+            "4️⃣ El bot se registrará, cifrará y activará con webhook.\n\n"
+            "🔐 El token no se mostrará en los logs. El mensaje se elimina después de recibirlo."
         )
-
-    async def show_start(message: Message) -> None:
-        uid = int(message.from_user.id)
-        if uid in manager.settings.admin_ids:
-            text = (
-                "<b>👑 BOT MASTER</b>\n"
-                "<i>Centro de control de la plataforma</i>\n\n"
-                "🟢 <b>Creación pública:</b> cualquier usuario puede registrar un bot hijo.\n"
-                "🧩 <b>Gestión central:</b> estado, salud, reinicios y configuración.\n"
-                "🛡️ <b>Administración:</b> control y supervisión de todos los tenants.\n\n"
-                "<b>Selecciona una sección para comenzar.</b>"
-            )
-            await message.answer(text, reply_markup=admin_kb())
-        else:
-            text = (
-                "<b>🚀 MULTIBOT HUB</b>\n"
-                "<i>Crea tu propio bot hijo en pocos minutos</i>\n\n"
-                "<b>¿Cómo funciona?</b>\n"
-                "1️⃣ Crea un bot con <code>@BotFather</code>.\n"
-                "2️⃣ Pulsa <b>➕ Crear mi bot</b>.\n"
-                "3️⃣ Pega el token y espera la validación.\n"
-                "4️⃣ Tu bot quedará listo para usar.\n\n"
-                "<b>✨ Incluye</b>\n"
-                "🏠 Salas públicas y privadas\n"
-                "📸 Fotos · 🎬 Vídeos · 📎 Archivos · 🖼️ Álbumes\n"
-                "🕶️ Publicación anónima en salas\n"
-                "📱 Mini App móvil\n\n"
-                "<b>🔐 Seguridad</b>\n"
-                "Los tokens se validan y se almacenan cifrados. No los compartas con otras personas."
-            )
-            await message.answer(text, reply_markup=master_public_kb())
 
     @router.message(CommandStart())
     async def start(message: Message) -> None:
-        await show_start(message)
+        uid = int(message.from_user.id)
+        if uid in manager.settings.admin_ids:
+            text = (
+                "<b>👑 MASTER CONTROL</b>\n\n"
+                "🟢 Multi-bot activo\n"
+                "🔐 Tokens cifrados\n"
+                "🌐 Webhooks individuales\n"
+                "🧩 Cada bot tiene runtime aislado\n\n"
+                "Usa el panel para administrar la plataforma."
+            )
+        else:
+            text = (
+                "<b>🚀 MULTIBOT HUB</b>\n\n"
+                "Crea tu propio bot hijo sin configurar servidores ni polling.\n\n"
+                "✨ Salas públicas/privadas\n"
+                "📸 Fotos · 🎬 Vídeos · 📎 Archivos · 🎞 GIF · 🖼 Álbumes\n"
+                "🕶️ Distribución anónima\n"
+                "📱 Mini App\n\n"
+                "🔐 Los tokens se validan y se almacenan cifrados."
+            )
+        await message.answer(text, reply_markup=menu(uid))
 
     @router.message(Command("add_bot"))
     async def add_bot(message: Message) -> None:
-        await begin_create(message)
+        await begin_create(message, int(message.from_user.id))
 
     @router.message(Command("bots"))
     async def bots(message: Message) -> None:
-        if not is_admin(message):
-            docs = await manager.repositories.bots.list_for_owner(int(message.from_user.id))
-            if not docs:
-                await message.answer("🤖 Aún no tienes bots hijos.", reply_markup=master_public_kb())
-                return
-            await _render_bot_list(message, docs, owner_view=True)
-            return
-        docs = await manager.repositories.bots.list_all()
-        await _render_bot_list(message, docs, owner_view=False)
-
-    async def _render_bot_list(target: Message, docs: list[dict], owner_view: bool) -> None:
+        uid = int(message.from_user.id)
+        docs = await manager.repositories.bots.list_all() if is_admin(uid) else await manager.repositories.bots.list_for_owner(uid)
         if not docs:
-            await target.answer("<b>🤖 Bots</b>\n\nTodavía no hay bots registrados.", reply_markup=admin_kb() if is_admin(target) else master_public_kb())
+            await message.answer("<b>🤖 Bots</b>\n\nNo hay bots registrados.", reply_markup=menu(uid))
             return
+        await render_list(message, docs)
+
+    async def render_list(target: Message, docs: list[dict]) -> None:
+        uid = int(target.from_user.id)
         rows = []
         for doc in docs[:30]:
-            status = {"RUNNING": "🟢", "STARTING": "🟡", "RESTARTING": "🟠", "ERROR": "🔴", "STOPPED": "⚫", "DISABLED": "🔵"}.get(doc.get("status"), "⚪")
-            label = f"{status} @{doc.get('username') or doc['bot_id']}"
-            rows.append([InlineKeyboardButton(text=label[:40], callback_data=f"master:botinfo:{doc['bot_id']}")])
-        rows.append([InlineKeyboardButton(text="➕ Crear bot", callback_data="master:create")])
+            icons = {"RUNNING": "🟢", "STARTING": "🟡", "RESTARTING": "🟠", "ERROR": "🔴", "STOPPED": "⚫", "DISABLED": "🔵"}
+            label = f"{icons.get(doc.get('status'), '⚪')} @{doc.get('username') or doc.get('bot_id')}"
+            rows.append([InlineKeyboardButton(text=label[:42], callback_data=f"master:botinfo:{doc['bot_id']}")])
         rows.append([InlineKeyboardButton(text="↩️ Inicio", callback_data="master:home")])
-        await target.answer(f"<b>{'🤖 Mis bots' if owner_view else '🤖 Todos los bots'}</b>\n\nSelecciona un bot:", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+        await target.answer("<b>🤖 Bots</b>\n\nSelecciona uno:", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
-    @router.message(Command("bot_info"))
-    async def bot_info(message: Message) -> None:
-        parts = (message.text or "").split()
-        if len(parts) != 2 or not parts[1].isdigit():
-            await message.answer("Uso: /bot_info ID")
-            return
-        await send_info(message, int(parts[1]))
-
-    async def send_info(target, bot_id: int) -> None:
-        try:
-            info = await manager.get_info(bot_id)
-        except Exception as exc:
-            await target.answer(f"❌ {html.escape(str(exc))}")
-            return
+    async def show_info(target, bot_id: int) -> None:
+        info = await manager.get_info(bot_id)
         uid = int(target.from_user.id)
-        allowed = uid in manager.settings.admin_ids or uid == info.owner_id
-        if not allowed:
+        if uid not in manager.settings.admin_ids and uid != info.owner_id:
             await target.answer("⛔ No puedes administrar este bot.")
             return
         runtime = manager.registry.get(bot_id)
-        feed_count = await manager.repositories.admin_feed.count(bot_id)
+        status = runtime.status.value if runtime else info.status
         queue = runtime.broadcast_queue.qsize() if runtime and runtime.broadcast_queue else 0
-        status_icon = {"RUNNING": "🟢", "ERROR": "🔴", "STOPPED": "⚫", "STARTING": "🟡", "RESTARTING": "🟠"}.get(str(info.status), "⚪")
-        feed_line = f"🛰 Admin Feed activos: <b>{feed_count}</b>\n" if uid in manager.settings.admin_ids else ""
         text = (
             f"<b>🤖 @{html.escape(info.username or str(info.bot_id))}</b>\n\n"
-            f"{status_icon} Estado: <b>{info.status}</b>\n"
+            f"🟢 Estado: <b>{html.escape(status)}</b>\n"
             f"🆔 <code>{info.bot_id}</code>\n"
             f"👤 Owner: <code>{info.owner_id}</code>\n"
-            f"{feed_line}"
             f"📦 Cola: <b>{queue}</b>\n"
             f"🔄 Reinicios: <b>{info.restart_count}</b>\n"
-            f"❤️ Heartbeat: <b>{info.last_heartbeat or '—'}</b>"
+            f"❤️ Heartbeat: <code>{html.escape(str(info.last_heartbeat or '—'))}</code>"
         )
         rows = []
         if info.username:
@@ -150,227 +106,150 @@ def build_master_router(manager) -> Router:
         if uid in manager.settings.admin_ids:
             rows.extend([
                 [InlineKeyboardButton(text="▶️ Iniciar", callback_data=f"master:start:{bot_id}"), InlineKeyboardButton(text="⏹ Detener", callback_data=f"master:stop:{bot_id}")],
-                [InlineKeyboardButton(text="🔄 Reiniciar", callback_data=f"master:restart:{bot_id}"), InlineKeyboardButton(text="📊 Salud", callback_data=f"master:healthbot:{bot_id}")],
-                [InlineKeyboardButton(text="🗑 Eliminar", callback_data=f"master:delete:{bot_id}")],
+                [InlineKeyboardButton(text="🔄 Reiniciar", callback_data=f"master:restart:{bot_id}"), InlineKeyboardButton(text="🗑 Eliminar", callback_data=f"master:delete:{bot_id}")],
             ])
         rows.append([InlineKeyboardButton(text="↩️ Bots", callback_data="master:list")])
-        await target.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+        if isinstance(target, CallbackQuery):
+            await target.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+        else:
+            await target.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
-    async def perform(message_or_callback, action: str, bot_id: int) -> None:
-        if isinstance(message_or_callback, Message):
-            actor = int(message_or_callback.from_user.id)
-        else:
-            actor = int(message_or_callback.from_user.id)
-        if actor not in manager.settings.admin_ids:
-            if isinstance(message_or_callback, CallbackQuery):
-                await message_or_callback.answer("Solo administradores.", show_alert=True)
-            else:
-                await message_or_callback.answer("⛔ Solo administradores.")
+    @router.callback_query(F.data == "master:home")
+    async def home(callback: CallbackQuery) -> None:
+        await callback.answer()
+        await callback.message.edit_text("<b>🚀 MULTIBOT HUB</b>\n\nSelecciona una opción:", reply_markup=menu(int(callback.from_user.id)))
+
+    @router.callback_query(F.data == "master:how")
+    async def how(callback: CallbackQuery) -> None:
+        await callback.answer()
+        await callback.message.edit_text(
+            "<b>📖 Cómo funciona</b>\n\n"
+            "1. Creas tu bot en @BotFather.\n"
+            "2. Lo registras en el Master.\n"
+            "3. El Master valida el token con Telegram.\n"
+            "4. Se crea un runtime independiente y su webhook.\n"
+            "5. Tu bot puede gestionar sus propias salas y multimedia.\n\n"
+            "Un fallo en un child no detiene al Master ni a los demás bots.",
+            reply_markup=menu(int(callback.from_user.id)),
+        )
+
+    @router.callback_query(F.data == "master:mine")
+    async def mine(callback: CallbackQuery) -> None:
+        await callback.answer()
+        docs = await manager.repositories.bots.list_for_owner(int(callback.from_user.id))
+        if not docs:
+            await callback.message.edit_text("<b>🤖 Mis bots</b>\n\nTodavía no tienes bots.", reply_markup=menu(int(callback.from_user.id)))
             return
-        try:
-            result = await getattr(manager, action)(bot_id)
-            text = f"✅ {html.escape(str(result))}"
-        except Exception as exc:
-            text = f"❌ {type(exc).__name__}: {html.escape(str(exc)[:300])}"
-        if isinstance(message_or_callback, CallbackQuery):
-            await message_or_callback.answer(text[:190], show_alert=True)
-            await send_info(message_or_callback.message, bot_id)
-        else:
-            await message_or_callback.answer(text)
+        rows = [[InlineKeyboardButton(text=f"🤖 @{doc.get('username') or doc['bot_id']}", callback_data=f"master:botinfo:{doc['bot_id']}")] for doc in docs[:30]]
+        rows.append([InlineKeyboardButton(text="↩️ Inicio", callback_data="master:home")])
+        await callback.message.edit_text("<b>🤖 Mis bots</b>", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+
+    @router.callback_query(F.data == "master:list")
+    async def admin_list(callback: CallbackQuery) -> None:
+        if not is_admin(int(callback.from_user.id)):
+            await callback.answer("No autorizado", show_alert=True)
+            return
+        await callback.answer()
+        docs = await manager.repositories.bots.list_all()
+        rows = [[InlineKeyboardButton(text=f"{doc.get('status','?')} · @{doc.get('username') or doc['bot_id']}", callback_data=f"master:botinfo:{doc['bot_id']}")] for doc in docs[:50]]
+        rows.append([InlineKeyboardButton(text="➕ Crear bot", callback_data="master:create"), InlineKeyboardButton(text="↩️ Inicio", callback_data="master:home")])
+        await callback.message.edit_text("<b>🛡️ Todos los bots</b>", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
     @router.callback_query(F.data == "master:create")
     async def create_callback(callback: CallbackQuery) -> None:
         await callback.answer()
         await begin_create(callback.message, int(callback.from_user.id))
 
-    @router.callback_query(F.data == "master:home")
-    async def home_callback(callback: CallbackQuery) -> None:
-        await callback.answer()
-        if int(callback.from_user.id) in manager.settings.admin_ids:
-            await callback.message.edit_text("<b>👑 BOT MASTER</b>\n<i>Centro de control</i>\n\nSelecciona una sección.", reply_markup=admin_kb())
-        else:
-            await callback.message.edit_text("<b>🚀 MULTIBOT HUB</b>\n<i>Selecciona una opción</i>", reply_markup=master_public_kb())
-
-    @router.callback_query(F.data == "master:mine")
-    async def mine_callback(callback: CallbackQuery) -> None:
-        docs = await manager.repositories.bots.list_for_owner(int(callback.from_user.id))
-        await callback.answer()
-        await callback.message.edit_text("<b>🤖 Mis bots</b>\n\nSelecciona un bot:" if docs else "🤖 Todavía no tienes bots.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"{'🟢' if d.get('status') == 'RUNNING' else '⚪'} @{d.get('username') or d['bot_id']}", callback_data=f"master:botinfo:{d['bot_id']}")] for d in docs[:20]] + [[InlineKeyboardButton(text="➕ Crear bot", callback_data="master:create")], [InlineKeyboardButton(text="↩️ Inicio", callback_data="master:home")]]))
-
-    @router.callback_query(F.data == "master:list")
-    async def list_callback(callback: CallbackQuery) -> None:
-        if int(callback.from_user.id) not in manager.settings.admin_ids:
-            await callback.answer("Solo administradores.", show_alert=True); return
-        docs = await manager.repositories.bots.list_all()
-        await callback.answer()
-        if not docs:
-            await callback.message.edit_text("<b>🤖 Todos los bots</b>\n\nNo hay bots registrados.", reply_markup=admin_kb()); return
-        rows = [[InlineKeyboardButton(text=f"{'🟢' if d.get('status') == 'RUNNING' else '🔴' if d.get('status') == 'ERROR' else '⚪'} @{d.get('username') or d['bot_id']}", callback_data=f"master:botinfo:{d['bot_id']}")] for d in docs[:30]]
-        rows.append([InlineKeyboardButton(text="➕ Crear bot", callback_data="master:create"), InlineKeyboardButton(text="↩️ Inicio", callback_data="master:home")])
-        await callback.message.edit_text("<b>🤖 Todos los bots</b>\n\nSelecciona un bot:", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
-
     @router.callback_query(F.data.startswith("master:botinfo:"))
-    async def botinfo_callback(callback: CallbackQuery) -> None:
-        bot_id = int(callback.data.split(":")[-1])
+    async def info_callback(callback: CallbackQuery) -> None:
         await callback.answer()
-        await send_info(callback.message, bot_id)
+        await show_info(callback, int(callback.data.split(":")[-1]))
+
+    async def admin_action(callback: CallbackQuery, action: str, bot_id: int) -> None:
+        if not is_admin(int(callback.from_user.id)):
+            await callback.answer("No autorizado", show_alert=True)
+            return
+        try:
+            if action == "start":
+                result = await manager.start_bot(bot_id)
+            elif action == "stop":
+                result = await manager.stop_bot(bot_id)
+            elif action == "restart":
+                result = await manager.restart_bot(bot_id, reason="manual")
+            elif action == "delete":
+                await manager.stop_bot(bot_id)
+                result = await manager.delete_bot(bot_id)
+                await callback.answer(result, show_alert=False)
+                await callback.message.edit_text("🗑️ Bot eliminado.", reply_markup=menu(int(callback.from_user.id)))
+                return
+            else:
+                raise ValueError("Acción inválida")
+            await callback.answer(result, show_alert=False)
+        except Exception as exc:
+            await callback.answer(str(exc)[:180], show_alert=True)
+        await show_info(callback, bot_id)
 
     @router.callback_query(F.data.startswith("master:start:"))
-    async def start_bot_callback(callback: CallbackQuery) -> None:
-        await perform(callback, "bot_start", int(callback.data.split(":")[-1]))
+    async def start_callback(callback: CallbackQuery) -> None:
+        await admin_action(callback, "start", int(callback.data.split(":")[-1]))
 
     @router.callback_query(F.data.startswith("master:stop:"))
-    async def stop_bot_callback(callback: CallbackQuery) -> None:
-        await perform(callback, "bot_stop", int(callback.data.split(":")[-1]))
+    async def stop_callback(callback: CallbackQuery) -> None:
+        await admin_action(callback, "stop", int(callback.data.split(":")[-1]))
 
     @router.callback_query(F.data.startswith("master:restart:"))
-    async def restart_bot_callback(callback: CallbackQuery) -> None:
-        await perform(callback, "bot_restart", int(callback.data.split(":")[-1]))
+    async def restart_callback(callback: CallbackQuery) -> None:
+        await admin_action(callback, "restart", int(callback.data.split(":")[-1]))
 
     @router.callback_query(F.data.startswith("master:delete:"))
-    async def delete_bot_callback(callback: CallbackQuery) -> None:
-        bot_id = int(callback.data.split(":")[-1])
-        if int(callback.from_user.id) not in manager.settings.admin_ids:
-            await callback.answer("Solo administradores.", show_alert=True); return
-        await callback.answer("Confirma eliminación", show_alert=True)
-        await callback.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⚠️ Sí, eliminar", callback_data=f"master:delete_confirm:{bot_id}")], [InlineKeyboardButton(text="↩️ Cancelar", callback_data=f"master:botinfo:{bot_id}")]]))
+    async def delete_callback(callback: CallbackQuery) -> None:
+        await admin_action(callback, "delete", int(callback.data.split(":")[-1]))
 
-    @router.callback_query(F.data.startswith("master:delete_confirm:"))
-    async def delete_confirm(callback: CallbackQuery) -> None:
-        await perform(callback, "bot_delete", int(callback.data.split(":")[-1]))
-
-    @router.callback_query(F.data == "master:health")
-    async def health(callback: CallbackQuery) -> None:
-        if int(callback.from_user.id) not in manager.settings.admin_ids:
-            await callback.answer("Solo administradores.", show_alert=True); return
-        lines = ["<b>❤️ Salud de la plataforma</b>", ""]
-        for bot_id, runtime in manager.registry.items():
-            q1 = runtime.broadcast_queue.qsize() if runtime.broadcast_queue else 0
-            q2 = runtime.admin_feed_queue.qsize() if runtime.admin_feed_queue else 0
-            lines.append(f"{'🟢' if str(runtime.status) == 'RUNNING' else '🔴'} <code>{bot_id}</code> · {runtime.status} · cola {q1 + q2}")
-        await callback.answer()
-        await callback.message.edit_text("\n".join(lines) if len(lines) > 2 else "<b>❤️ Salud</b>\n\nNo hay runtimes activos.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="↩️ Inicio", callback_data="master:home")]]))
-
-    @router.callback_query(F.data.startswith("master:healthbot:"))
-    async def healthbot(callback: CallbackQuery) -> None:
-        if int(callback.from_user.id) not in manager.settings.admin_ids:
-            await callback.answer("Solo administradores.", show_alert=True); return
-        bot_id = int(callback.data.split(":")[-1])
-        runtime = manager.registry.get(bot_id)
-        await callback.answer()
-        if not runtime:
-            await callback.message.answer("⚫ El runtime no está activo."); return
-        await callback.message.answer(f"<b>❤️ Health {bot_id}</b>\n\nEstado: {runtime.status}\nTasks: {runtime.task_registry.count}\nBroadcast: {runtime.broadcast_queue.qsize() if runtime.broadcast_queue else 0}\nAdmin feed: {runtime.admin_feed_queue.qsize() if runtime.admin_feed_queue else 0}")
-
-    @router.callback_query(F.data == "master:stats")
-    async def stats_callback(callback: CallbackQuery) -> None:
-        if int(callback.from_user.id) not in manager.settings.admin_ids:
-            await callback.answer("Solo administradores.", show_alert=True); return
-        docs = await manager.repositories.bots.list_all()
-        running = sum(1 for d in docs if d.get("status") == "RUNNING")
-        enabled = sum(1 for d in docs if d.get("enabled"))
-        await callback.answer()
-        await callback.message.edit_text(f"<b>📊 Estadísticas</b>\n\n🤖 Bots: <b>{len(docs)}</b>\n🟢 Running: <b>{running}</b>\n✅ Habilitados: <b>{enabled}</b>", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="↩️ Inicio", callback_data="master:home")]]))
-
-    @router.callback_query(F.data == "master:how")
-    async def how_callback(callback: CallbackQuery) -> None:
-        await callback.answer()
-        await callback.message.edit_text(
-            "<b>📖 CÓMO FUNCIONA</b>\n"
-            "<i>Una plataforma para crear y administrar bots Telegram sin duplicar infraestructura</i>\n\n"
-            "<b>👤 Creadores</b>\n"
-            "Cualquier usuario puede registrar un bot hijo con un token válido de <code>@BotFather</code>.\n\n"
-            "<b>👑 Administradores</b>\n"
-            "Supervisan el estado, salud y actividad de los bots registrados.\n\n"
-            "<b>🏠 Salas</b>\n"
-            "Comunidades públicas y privadas con permisos, moderación y difusión anónima.\n\n"
-            "<b>🔐 Privacidad</b>\n"
-            "El contenido de un bot puede ser revisado por la administración para moderación, seguridad y cumplimiento.\n\n"
-            "<b>📱 Mini App</b>\n"
-            "La gestión de salas y perfiles también está disponible desde una interfaz móvil.",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="↩️ Inicio", callback_data="master:home")]]),
-        )
+    @router.message(Command("bot_info"))
+    async def bot_info(message: Message) -> None:
+        parts = (message.text or "").split()
+        if len(parts) != 2 or not parts[1].isdigit():
+            await message.answer("Uso: /bot_info ID")
+            return
+        await show_info(message, int(parts[1]))
 
     @router.message()
-    async def master_session(message: Message) -> None:
-        if not message.text or message.text.startswith("/") or not message.from_user:
+    async def session_messages(message: Message) -> None:
+        if not message.from_user or not message.text:
             return
-
-        user_id = int(message.from_user.id)
-        session = await manager.repositories.session.get(0, user_id)
-        if not session or session.get("step") != "master_token":
+        if message.text.startswith("/"):
             return
-
+        uid = int(message.from_user.id)
+        session = await manager.repositories.session.get(0, uid)
+        if not session:
+            await message.answer("Usa /start para abrir el panel.", reply_markup=menu(uid))
+            return
+        if session.get("step") != "create_child_token":
+            return
         token = message.text.strip()
-        manager.logger.info("master_child_token_received owner_id=%s", user_id)
-        if len(token) > 256 or ":" not in token:
+        try:
+            # Delete the secret-bearing message as early as possible.
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            info = await manager.register_bot(token, uid, metadata={"created_from": "master_chat"})
+            await manager.repositories.session.clear(0, uid)
+            await manager.repositories.audit.log(0, uid, "BOT_CREATED", target=str(info.bot_id), details={"username": info.username})
             await message.answer(
-                "<b>⚠️ TOKEN NO VÁLIDO</b>\n\n"
-                "Pega exactamente el token que te entrega <code>@BotFather</code>."
-            )
-            return
-
-        # Consumimos la sesión antes de provisionar para evitar doble alta por
-        # reintentos de Telegram. En caso de error, el usuario puede volver a
-        # pulsar Crear bot.
-        await manager.repositories.session.clear(0, user_id)
-
-        status_message = await message.answer(
-            "<b>⏳ VALIDANDO BOT</b>\n\n"
-            "Estoy comprobando el token con Telegram.\n"
-            "Después configuraré el webhook y pondré tu bot en línea.\n\n"
-            "<i>No cierres el chat durante el proceso.</i>"
-        )
-        try:
-            await message.delete()
-        except Exception:
-            pass
-
-        try:
-            info = await asyncio.wait_for(
-                manager.register_bot(token, user_id),
-                timeout=75.0,
-            )
-            manager.logger.info("master_child_created owner_id=%s bot_id=%s", user_id, info.bot_id)
-            rows = []
-            if info.username:
-                rows.append([InlineKeyboardButton(text="🤖 Abrir mi bot", url=f"https://t.me/{info.username}")])
-            rows.append([create_webapp_button()])
-            rows.append([InlineKeyboardButton(text="➕ Crear otro bot", callback_data="master:create"), InlineKeyboardButton(text="🤖 Mis bots", callback_data="master:mine")])
-            rows.append([InlineKeyboardButton(text="↩️ Inicio", callback_data="master:home")])
-            await status_message.edit_text(
-                "<b>🎉 BOT HIJO LISTO</b>\n\n"
+                "<b>🎉 BOT CREADO Y ACTIVO</b>\n\n"
                 f"🤖 <b>@{html.escape(info.username or str(info.bot_id))}</b>\n"
                 f"🆔 <code>{info.bot_id}</code>\n"
-                "🟢 <b>Estado:</b> Activo\n\n"
-                "Tu bot ya está configurado y funcionando.",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+                "🟢 Webhook configurado\n"
+                "🧩 Runtime independiente\n\n"
+                "Tu bot ya está listo.",
+                reply_markup=menu(uid),
             )
-        except asyncio.TimeoutError:
-            manager.logger.error("master_child_create_timeout owner_id=%s", user_id)
-            await status_message.edit_text(
-                "<b>⏱️ PROCESO EN CURSO</b>\n\n"
-                "Telegram está tardando más de lo habitual.\n"
-                "Revisa <b>🤖 Mis bots</b> antes de volver a crearlo para evitar duplicados.",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🤖 Mis bots", callback_data="master:mine")], [InlineKeyboardButton(text="↩️ Inicio", callback_data="master:home")]]),
-            )
+        except InvalidBotTokenError as exc:
+            await manager.repositories.session.clear(0, uid)
+            await message.answer(f"❌ {html.escape(str(exc))}")
         except Exception as exc:
-            manager.logger.exception("master_child_create_failed owner_id=%s", user_id)
-            await status_message.edit_text(
-                "<b>❌ NO SE PUDO CREAR EL BOT</b>\n\n"
-                f"<i>{html.escape(str(exc)[:500])}</i>\n\n"
-                "Corrige el token y vuelve a intentarlo.",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[create_webapp_button()], [InlineKeyboardButton(text="↩️ Inicio", callback_data="master:home")]]),
-            )
-
-    @router.message(Command("stats"))
-    async def stats_cmd(message: Message) -> None:
-        if not is_admin(message):
-            await message.answer("<b>📊 Estadísticas</b>\n\nEsta sección está disponible únicamente para administradores.")
-            return
-        docs = await manager.repositories.bots.list_all()
-        running = sum(1 for d in docs if d.get("status") == "RUNNING")
-        enabled = sum(1 for d in docs if d.get("enabled"))
-        await message.answer(f"<b>📊 Estadísticas</b>\n\n🤖 Bots: <b>{len(docs)}</b>\n🟢 Running: <b>{running}</b>\n✅ Habilitados: <b>{enabled}</b>", reply_markup=admin_kb())
+            await manager.repositories.session.clear(0, uid)
+            await message.answer(f"❌ No se pudo activar el bot: {html.escape(str(exc)[:500])}")
 
     return router

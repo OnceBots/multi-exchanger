@@ -1,109 +1,58 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 
-from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramNetworkError, TelegramRetryAfter, TelegramServerError
-from aiogram.types import InputMediaAnimation, InputMediaDocument, InputMediaPhoto, InputMediaVideo
+from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter
+from aiogram.types import InputMediaPhoto, InputMediaVideo
 
 
 class AdminFeedService:
-    """Fan-out direct child-bot content to subscribed super-admins."""
-
     def __init__(self, ctx) -> None:
         self.ctx = ctx
-        self.repo = ctx.repositories.admin_feed
-        self.logger = ctx.logger
+        self.logger = logging.getLogger(f"admin_feed.{ctx.bot_id}")
 
-    async def enqueue_message(self, message) -> bool:
-        subscribers = await self.repo.subscribers(self.ctx.bot_id)
-        recipients = [uid for uid in subscribers if int(uid) != int(message.from_user.id if message.from_user else 0)]
-        if not recipients:
-            return False
-        queue = self.ctx.runtime.admin_feed_queue
-        if queue is None:
-            return False
-        await queue.put({
-            "kind": "message",
-            "source_chat_id": int(message.chat.id),
-            "source_message_id": int(message.message_id),
-            "recipients": recipients,
-            "sender_id": int(message.from_user.id) if message.from_user else None,
-        })
-        return True
+    async def enabled_admins(self) -> list[int]:
+        result = []
+        for admin_id in self.ctx.settings.admin_ids:
+            doc = await self.ctx.repositories.admin_feed.col.find_one({"bot_id": self.ctx.bot_id, "admin_id": admin_id})
+            enabled = self.ctx.settings.admin_feed_enabled_by_default if not doc else bool(doc.get("enabled", False))
+            if enabled:
+                result.append(int(admin_id))
+        return result
 
-    async def enqueue_album(self, group: dict) -> bool:
-        subscribers = await self.repo.subscribers(self.ctx.bot_id)
-        recipients = [uid for uid in subscribers if int(uid) != int(group.get("sender_id", 0))]
-        if not recipients:
-            return False
-        queue = self.ctx.runtime.admin_feed_queue
-        if queue is None:
-            return False
-        await queue.put({"kind": "album", "group": group, "recipients": recipients})
-        return True
-
-    async def process(self, job: dict) -> None:
-        if job["kind"] == "message":
-            await self._process_message(job)
-        else:
-            await self._process_album(job)
-
-    async def _process_message(self, job: dict) -> None:
-        for uid in job["recipients"]:
-            await self._deliver_with_retry(
-                uid,
-                lambda uid=uid: self.ctx.bot.copy_message(
-                    chat_id=uid,
-                    from_chat_id=job["source_chat_id"],
-                    message_id=job["source_message_id"],
-                ),
-            )
-        self.ctx.runtime.metrics.inc("admin_feed_deliveries_total", amount=len(job["recipients"]))
-
-    async def _process_album(self, job: dict) -> None:
-        group = job["group"]
-        items = sorted(group.get("items", []), key=lambda x: int(x["message_id"]))[:10]
-        media = []
-        for index, item in enumerate(items):
-            caption = item.get("caption") if index == 0 else None
-            kind = item["type"]
-            fid = item["file_id"]
-            if kind == "photo":
-                media.append(InputMediaPhoto(media=fid, caption=caption))
-            elif kind == "video":
-                media.append(InputMediaVideo(media=fid, caption=caption))
-            elif kind == "document":
-                media.append(InputMediaDocument(media=fid, caption=caption))
-            elif kind == "animation":
-                media.append(InputMediaAnimation(media=fid, caption=caption))
-        if not media:
+    async def process(self, item: dict) -> None:
+        admins = await self.enabled_admins()
+        if not admins:
             return
-        for uid in job["recipients"]:
-            await self._deliver_with_retry(uid, lambda uid=uid: self.ctx.bot.send_media_group(chat_id=uid, media=media))
-        self.ctx.runtime.metrics.inc("admin_feed_deliveries_total", amount=len(job["recipients"]))
-        self.ctx.runtime.metrics.inc("admin_feed_albums_total")
-
-    async def _deliver_with_retry(self, uid: int, sender) -> None:
-        try:
-            await sender()
-        except TelegramRetryAfter as exc:
-            await asyncio.sleep(float(exc.retry_after))
+        caption = item.get("caption") or ""
+        prefix = f"🛡 <b>Moderación · @{html.escape(self.ctx.bot_username or str(self.ctx.bot_id))}</b>\n👤 Usuario: <code>{item['sender_id']}</code>\n"
+        text = prefix + (f"📝 {html.escape(caption[: self.ctx.settings.admin_feed_max_caption_length])}" if caption else "Sin texto adjunto.")
+        for admin_id in admins:
             try:
-                await sender()
-            except Exception as retry_exc:
-                await self._record_recipient_error(uid, retry_exc)
-        except (TelegramForbiddenError, TelegramBadRequest, TelegramNetworkError, TelegramServerError) as exc:
-            await self._record_recipient_error(uid, exc)
-        except Exception as exc:
-            self.logger.exception("admin_feed_delivery_failed bot_id=%s admin_id=%s", self.ctx.bot_id, uid)
-            await self._record_recipient_error(uid, exc)
-
-    async def _record_recipient_error(self, uid: int, exc: Exception) -> None:
-        self.ctx.runtime.metrics.inc("admin_feed_failures_total")
-        self.logger.warning(
-            "admin_feed_recipient_error bot_id=%s admin_id=%s error=%s",
-            self.ctx.bot_id,
-            uid,
-            str(exc)[:300],
-        )
+                if item["media_type"] == "album":
+                    media = []
+                    group = item.get("group") or {}
+                    for index, part in enumerate(sorted(group.get("items", []), key=lambda x: int(x.get("message_id", 0)))):
+                        cap = text if index == 0 else None
+                        if part.get("type") == "photo":
+                            media.append(InputMediaPhoto(media=part["file_id"], caption=cap, parse_mode="HTML" if cap else None))
+                        elif part.get("type") == "video":
+                            media.append(InputMediaVideo(media=part["file_id"], caption=cap, parse_mode="HTML" if cap else None))
+                    if media:
+                        await self.ctx.bot.send_media_group(admin_id, media=media)
+                elif item["media_type"] == "photo":
+                    await self.ctx.bot.send_photo(admin_id, item["file_id"], caption=text, parse_mode="HTML")
+                elif item["media_type"] == "video":
+                    await self.ctx.bot.send_video(admin_id, item["file_id"], caption=text, parse_mode="HTML")
+                elif item["media_type"] == "animation":
+                    await self.ctx.bot.send_animation(admin_id, item["file_id"], caption=text, parse_mode="HTML")
+                else:
+                    await self.ctx.bot.send_document(admin_id, item["file_id"], caption=text, parse_mode="HTML")
+            except TelegramRetryAfter as exc:
+                await asyncio.sleep(float(exc.retry_after) + 0.25)
+            except TelegramForbiddenError:
+                self.logger.info("admin_feed_blocked admin_id=%s", admin_id)
+            except Exception:
+                self.logger.exception("admin_feed_send_failed admin_id=%s", admin_id)
