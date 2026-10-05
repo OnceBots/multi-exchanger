@@ -1,3 +1,12 @@
+
+## v11 — Mini App launch/auth compatibility
+
+- Adopted the proven `aprovebot.py` WebApp URL shape (`bot`, `bot_id`, `user_id`, `id`, `v`).
+- Added compatibility authentication fallback from `X-Telegram-User-Id` and query `user_id`/`id`.
+- Kept Telegram `initData` as the preferred validation path and the signed launch token as the second path.
+- Child Mini App now sends the Telegram/query user id on API calls.
+- Added regression coverage for query-user authentication.
+
 ## v10 - Mini App compatibility with proven launcher
 
 - Child and Master Mini App URLs now follow the working `aprovebot.py` pattern: `bot`, `bot_id`, `user_id`, `v` and a short-lived signed launch token in the query string.

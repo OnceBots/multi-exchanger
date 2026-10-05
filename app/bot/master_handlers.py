@@ -39,6 +39,7 @@ def build_master_router(manager) -> Router:
         )
         params = {
             "user_id": str(user_id),
+            "id": str(user_id),
             "v": str(int(time.time())),
             "launch": token,
         }

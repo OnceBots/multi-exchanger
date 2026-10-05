@@ -35,10 +35,13 @@ def _webapp_url(ctx, user_id: int) -> str:
         user_id,
         ctx.settings.webapp_launch_ttl_seconds,
     )
+    # Same personalized URL shape used by the proven aprovebot.py Mini App.
+    # Keep both user_id and id for compatibility with older clients.
     params = {
         "bot": ctx.bot_username or str(ctx.bot_id),
         "bot_id": str(ctx.bot_id),
         "user_id": str(user_id),
+        "id": str(user_id),
         "v": str(int(time.time())),
         "launch": token,
     }

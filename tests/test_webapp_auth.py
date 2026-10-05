@@ -40,3 +40,25 @@ def test_launch_token_roundtrip_without_init_data():
     user, source = authenticate_webapp_request(request, bot_id=8900, bot_token="unused", launch_secret=secret, max_age_seconds=300)
     assert user == {"id": 42}
     assert source == "launch_token"
+
+
+def test_query_user_id_fallback():
+    from starlette.requests import Request
+    from app.services.webapp_auth import authenticate_webapp_request
+
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/api/child/rooms",
+        "headers": [],
+        "query_string": b"bot_id=123&user_id=456&id=456",
+        "client": ("127.0.0.1", 1),
+        "server": ("test", 80),
+        "scheme": "http",
+    }
+    request = Request(scope)
+    user, source = authenticate_webapp_request(
+        request, bot_id=123, bot_token="unused", launch_secret="secret", max_age_seconds=86400
+    )
+    assert user == {"id": 456}
+    assert source == "query_user_id"

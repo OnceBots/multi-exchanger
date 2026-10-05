@@ -113,4 +113,26 @@ def authenticate_webapp_request(
         if user_id:
             return {"id": user_id}, "launch_token"
 
+    # Compatibility fallback copied from the proven aprovebot.py flow.
+    # Prefer a Telegram-provided user id header (when available), then the
+    # personalized query parameters used by the working bot. These are last in
+    # the chain; validated initData and the signed launch token remain preferred.
+    header_user_id = (request.headers.get("X-Telegram-User-Id") or "").strip()
+    if header_user_id:
+        try:
+            uid = int(header_user_id)
+            if uid > 0:
+                return {"id": uid}, "telegram_user_id_header"
+        except (TypeError, ValueError):
+            pass
+
+    query_user_id = request.query_params.get("id") or request.query_params.get("user_id")
+    if query_user_id:
+        try:
+            uid = int(query_user_id)
+            if uid > 0:
+                return {"id": uid}, "query_user_id"
+        except (TypeError, ValueError):
+            pass
+
     return None, "none"
