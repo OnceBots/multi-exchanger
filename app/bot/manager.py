@@ -4,7 +4,7 @@ import asyncio
 import logging
 import time
 from collections import defaultdict, deque
-from datetime import datetime
+from datetime import datetime, timezone
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -70,21 +70,84 @@ class BotManager:
         self.master_dp.include_router(build_master_router(self))
         if self.settings.mode == "webhook":
             url = self.settings.webhook_base_url + self.settings.master_webhook_path
-            await self.master_bot.set_webhook(url=url, secret_token=self.settings.webhook_secret, allowed_updates=self.master_dp.resolve_used_update_types(), max_connections=self.settings.telegram_max_connections, drop_pending_updates=self.settings.drop_pending_updates)
-            info = await self.master_bot.get_webhook_info()
-            if info.url != url:
-                raise RuntimeError("El webhook del Master no coincide con la configuración")
-            self.logger.info("master_webhook_ready pending=%s", info.pending_update_count)
+            await self._set_and_verify_webhook(
+                self.master_bot,
+                url=url,
+                secret_token=self.settings.webhook_secret,
+                allowed_updates=self.master_dp.resolve_used_update_types(),
+                label="master",
+            )
         else:
             self.master_dp_task = asyncio.create_task(self.master_dp.start_polling(self.master_bot, handle_signals=False))
 
     async def bootstrap_children(self) -> None:
-        for doc in await self.repositories.bots.list_enabled():
-            bot_id = int(doc["bot_id"])
-            task = asyncio.create_task(self.start_bot(bot_id), name=f"child-start:{bot_id}")
-            task.add_done_callback(self._child_start_done)
+        """Start all enabled children before the platform becomes READY.
+
+        One invalid/transient child must not abort the whole platform, but its
+        exception is always consumed and persisted by ``start_bot``.
+        """
+        docs = await self.repositories.bots.list_enabled()
+        tasks = [
+            asyncio.create_task(self.start_bot(int(doc["bot_id"])), name=f"child-start:{int(doc['bot_id'])}")
+            for doc in docs
+        ]
+        if tasks:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for doc, result in zip(docs, results, strict=False):
+                if isinstance(result, Exception):
+                    self.logger.error(
+                        "child_bootstrap_failed bot_id=%s error=%s",
+                        doc.get("bot_id"),
+                        result,
+                        exc_info=(type(result), result, result.__traceback__),
+                    )
+
         self.supervisor_task = asyncio.create_task(self._supervisor_loop(), name="bot-supervisor")
         self.room_cleanup_task = asyncio.create_task(self._room_cleanup_loop(), name="room-cleanup")
+
+    async def _set_and_verify_webhook(
+        self,
+        bot: Bot,
+        *,
+        url: str,
+        secret_token: str,
+        allowed_updates: list[str],
+        label: str,
+        attempts: int = 3,
+    ) -> None:
+        last_error: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            try:
+                self.logger.info(
+                    "webhook_configuring label=%s attempt=%s/%s url=%s allowed=%s",
+                    label, attempt, attempts, url, allowed_updates,
+                )
+                await bot.set_webhook(
+                    url=url,
+                    secret_token=secret_token,
+                    allowed_updates=allowed_updates,
+                    max_connections=self.settings.telegram_max_connections,
+                    drop_pending_updates=self.settings.drop_pending_updates,
+                )
+                info = await bot.get_webhook_info()
+                if info.url != url:
+                    raise RuntimeError(
+                        f"Webhook de {label} no coincide: esperado={url!r} recibido={info.url!r}"
+                    )
+                self.logger.info(
+                    "webhook_ready label=%s pending=%s last_error=%s",
+                    label, info.pending_update_count, info.last_error_message,
+                )
+                return
+            except Exception as exc:
+                last_error = exc
+                self.logger.warning(
+                    "webhook_config_failed label=%s attempt=%s/%s error=%s",
+                    label, attempt, attempts, exc,
+                )
+                if attempt < attempts:
+                    await asyncio.sleep(min(2 * attempt, 5))
+        raise RuntimeError(f"No se pudo configurar el webhook de {label}") from last_error
 
     def _child_start_done(self, task: asyncio.Task) -> None:
         """Consume bootstrap task exceptions so one bad child cannot kill startup.
@@ -132,15 +195,18 @@ class BotManager:
                 dp.include_router(build_router(ctx))
                 if self.settings.mode == "webhook":
                     url = f"{self.settings.webhook_base_url}/telegram/webhook/{bot_id}"
-                    await bot.set_webhook(url=url, secret_token=secret, allowed_updates=dp.resolve_used_update_types(), max_connections=self.settings.telegram_max_connections, drop_pending_updates=self.settings.drop_pending_updates)
-                    wh = await bot.get_webhook_info()
-                    if wh.url != url:
-                        raise RuntimeError("Webhook del bot hijo no coincide")
+                    await self._set_and_verify_webhook(
+                        bot,
+                        url=url,
+                        secret_token=secret,
+                        allowed_updates=dp.resolve_used_update_types(),
+                        label=f"child:{bot_id}",
+                    )
                     runtime.status = BotStatus.RUNNING
                 else:
                     runtime.status = BotStatus.RUNNING
                     runtime.polling_task = runtime.add_task(dp.start_polling(bot, handle_signals=False))
-                runtime.started_at = datetime.utcnow()
+                runtime.started_at = datetime.now(timezone.utc)
                 runtime.restart_count = info.restart_count
                 runtime.broadcast_queue = asyncio.Queue(maxsize=self.settings.room_queue_maxsize)
                 runtime.album_queue = asyncio.Queue(maxsize=self.settings.room_queue_maxsize)
@@ -253,7 +319,7 @@ class BotManager:
             await asyncio.sleep(10)
             try:
                 docs = await self.repositories.bots.list_enabled()
-                now = datetime.utcnow()
+                now = datetime.now(timezone.utc)
                 for doc in docs:
                     bot_id = int(doc["bot_id"])
                     runtime = self.registry.get(bot_id)

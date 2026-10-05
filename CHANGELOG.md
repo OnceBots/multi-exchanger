@@ -15,3 +15,11 @@
 - Added authenticated `POST /api/master/create-bot` using Telegram WebApp `initData`.
 - Fixed owner-facing bot information so the internal administrator feed count is not exposed to bot owners.
 - Added diagnostic logging for the creation lifecycle without logging tokens.
+
+## v14 — webhook/runtime hardening
+- Los bots hijos y el Master verifican webhook con reintentos.
+- El arranque espera a los runtimes hijos antes de marcar la plataforma como READY.
+- `/ready` responde 503 hasta que Mongo, Master y los hijos iniciales estén listos.
+- Los webhooks registran recepción, deduplicación y errores de dispatch sin generar `Task exception was never retrieved`.
+- Render usa `/ready` como health check.
+- Pytest queda configurado con `pythonpath=.`.

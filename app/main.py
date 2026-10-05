@@ -25,6 +25,7 @@ class Platform:
         self.mongo = MongoManager(settings)
         self.manager: BotManager | None = None
         self.logger = logging.getLogger("platform")
+        self.ready = False
 
     async def startup(self) -> None:
         await self.mongo.connect()
@@ -32,9 +33,11 @@ class Platform:
         self.manager = BotManager(self.settings, self.mongo, SecretBox(self.settings.token_encryption_key))
         await self.manager.start_master()
         await self.manager.bootstrap_children()
-        self.logger.info("platform_ready")
+        self.ready = True
+        self.logger.info("platform_ready children=%s", len(self.manager.registry))
 
     async def shutdown(self) -> None:
+        self.ready = False
         if self.manager:
             await self.manager.shutdown()
         await self.mongo.close()
