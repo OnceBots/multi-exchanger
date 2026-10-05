@@ -36,3 +36,8 @@
 - Mini App redesigned with Telegram-aware theme variables, mobile-first layout, bottom navigation, skeletons, modals, toasts and room cards.
 - Mini App supports explore, my rooms, creation, details, join/leave, edit, permissions, moderation, profile and language preference.
 - Documentation updated for the new public Master and Admin Feed behaviour.
+
+## v9 - 2026-10-04
+- Fixed missing `asyncio` import in `app/main.py` that caused Render startup to fail.
+- Added defensive startup cleanup so partially initialized Mongo/HTTP resources are closed on startup exceptions.
+- Named the webhook reconciliation background task for clearer lifecycle/debugging.

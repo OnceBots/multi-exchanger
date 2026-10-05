@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -26,15 +27,23 @@ class Platform:
         self.logger = logging.getLogger("platform")
 
     async def startup(self) -> None:
-        await self.mongo.connect()
-        await ensure_indexes(self.mongo)
-        self.manager = BotManager(self.settings, self.mongo, SecretBox(self.settings.token_encryption_key))
-        await self.manager.start_master()
-        await self.manager.bootstrap_children()
-        if self.settings.mode == "webhook":
-            self.webhook_reconcile_task = asyncio.create_task(self.manager.master_webhook_reconcile_loop())
-            self.logger.info("webhook_reconcile_scheduled delay=8s interval=30s")
-        self.logger.info("platform_ready")
+        try:
+            await self.mongo.connect()
+            await ensure_indexes(self.mongo)
+            self.manager = BotManager(self.settings, self.mongo, SecretBox(self.settings.token_encryption_key))
+            await self.manager.start_master()
+            await self.manager.bootstrap_children()
+            if self.settings.mode == "webhook":
+                self.webhook_reconcile_task = asyncio.create_task(
+                    self.manager.master_webhook_reconcile_loop(),
+                    name="master-webhook-reconcile",
+                )
+                self.logger.info("webhook_reconcile_scheduled delay=8s interval=30s")
+            self.logger.info("platform_ready")
+        except BaseException:
+            self.logger.exception("platform_startup_failed")
+            await self.shutdown()
+            raise
 
     async def shutdown(self) -> None:
         if hasattr(self, "webhook_reconcile_task"):
