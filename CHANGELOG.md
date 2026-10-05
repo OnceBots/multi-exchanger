@@ -12,3 +12,9 @@
 - Legacy environment aliases `MASTER_TOKEN`, `SUPER_ADMINS` and `RENDER_EXTERNAL_URL` remain supported by configuration.
 - Docker readiness check aligned with `/ready`.
 - Added regression tests for Mini App auth fallback and Render configuration.
+
+## v6 - Async Mongo aggregate fix
+
+- Fixed `RoomRepository.list_for_user()` for PyMongo Async: `aggregate()` is awaited before calling `to_list()`.
+- Added regression test `tests/test_rooms_repository.py`.
+- No change to Telegram webhook architecture or Mini App launch mechanism.

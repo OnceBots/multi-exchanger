@@ -66,7 +66,8 @@ class RoomRepository:
             {"$sort": {"created_at": -1}},
             {"$limit": limit},
         ]
-        return await self.members.aggregate(pipeline).to_list(length=limit)
+        cursor = await self.members.aggregate(pipeline)
+        return await cursor.to_list(length=limit)
 
     async def is_member(self, bot_id: int, room_id: str, user_id: int) -> bool:
         return bool(await self.members.find_one({"bot_id": bot_id, "room_id": room_id, "user_id": user_id}, {"_id": 1}))

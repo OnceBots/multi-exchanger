@@ -141,3 +141,6 @@ Las pruebas que requieren Telegram real o MongoDB real deben ejecutarse con cred
 ## Despliegue limpio
 
 Consulta `DEPLOY_CLEAN_REBUILD.md` antes de reemplazar el contenido de un repositorio existente. Esta versión debe desplegarse como un conjunto completo; no combines módulos de releases anteriores.
+
+### Mini App
+The child interface is a Telegram Mini App (Web App): Telegram launches a hosted HTTPS web app inside its client using `WebAppInfo` / `MenuButtonWebApp`. The `/app` endpoint is the Mini App entry point; it is intentionally an HTTPS URL because Telegram Web Apps are web-based UIs rendered inside Telegram.
