@@ -11,6 +11,21 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def ensure_utc(value: datetime | None) -> datetime | None:
+    """Return a timezone-aware UTC datetime for MongoDB values.
+
+    PyMongo can decode BSON datetimes as naive UTC values unless the database
+    codec options request timezone awareness. Older documents in this project
+    may therefore contain both naive and aware datetimes. Normalizing at the
+    model boundary prevents invalid arithmetic such as naive - aware.
+    """
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 @dataclass(slots=True)
 class BotConfig:
     features: dict[str, bool] = field(default_factory=lambda: {"media": True, "rooms": True, "webapp": True})
@@ -65,6 +80,6 @@ class BotInfo:
             config=config,
             last_error=doc.get("last_error"),
             restart_count=int(doc.get("restart_count", 0)),
-            last_started_at=doc.get("last_started_at"),
-            last_heartbeat=doc.get("last_heartbeat"),
+            last_started_at=ensure_utc(doc.get("last_started_at")),
+            last_heartbeat=ensure_utc(doc.get("last_heartbeat")),
         )

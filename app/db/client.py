@@ -3,6 +3,8 @@ from __future__ import annotations
 import logging
 
 from pymongo import AsyncMongoClient
+from bson.codec_options import CodecOptions
+from datetime import timezone
 from pymongo.errors import PyMongoError
 from pymongo.server_api import ServerApi
 
@@ -26,7 +28,9 @@ class MongoManager:
             retryWrites=True,
             retryReads=True,
         )
-        self.db = self.client[self.settings.db_name]
+        self.db = self.client[self.settings.db_name].with_options(
+            codec_options=CodecOptions(tz_aware=True, tzinfo=timezone.utc)
+        )
         await self.ping()
         self.logger.info("mongodb_connected")
 

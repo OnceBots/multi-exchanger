@@ -16,7 +16,7 @@ from app.bot.runtime import BotRuntime
 from app.core.context import BotContext
 from app.core.enums import BotStatus
 from app.core.exceptions import BotAlreadyRunningError, BotNotFoundError
-from app.core.models import BotConfig, BotInfo
+from app.core.models import BotConfig, BotInfo, ensure_utc
 from app.core.task_registry import TaskRegistry
 from app.services.token_service import TokenService
 from app.services.child_bot_provisioner import ChildBotProvisioner
@@ -330,7 +330,7 @@ class BotManager:
                             self.logger.exception("supervisor_start_failed bot_id=%s", bot_id)
                         continue
                     if runtime and runtime.status == BotStatus.RUNNING:
-                        heartbeat = doc.get("last_heartbeat")
+                        heartbeat = ensure_utc(doc.get("last_heartbeat"))
                         if heartbeat and (now - heartbeat).total_seconds() > self.settings.heartbeat_interval_seconds * 3:
                             self.logger.warning("stale_heartbeat bot_id=%s", bot_id)
                             try:

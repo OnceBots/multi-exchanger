@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 class UserRepository:
@@ -8,8 +8,8 @@ class UserRepository:
         self.col = mongo.collection("users")
 
     async def upsert(self, bot_id: int, user_id: int, **extra) -> None:
-        extra.update({"updated_at": datetime.utcnow()})
-        await self.col.update_one({"bot_id": bot_id, "user_id": user_id}, {"$set": extra, "$setOnInsert": {"bot_id": bot_id, "user_id": user_id, "created_at": datetime.utcnow()}}, upsert=True)
+        extra.update({"updated_at": datetime.now(timezone.utc)})
+        await self.col.update_one({"bot_id": bot_id, "user_id": user_id}, {"$set": extra, "$setOnInsert": {"bot_id": bot_id, "user_id": user_id, "created_at": datetime.now(timezone.utc)}}, upsert=True)
 
     async def get(self, bot_id: int, user_id: int) -> dict | None:
         return await self.col.find_one({"bot_id": bot_id, "user_id": user_id})

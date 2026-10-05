@@ -23,3 +23,12 @@
 - Los webhooks registran recepción, deduplicación y errores de dispatch sin generar `Task exception was never retrieved`.
 - Render usa `/ready` como health check.
 - Pytest queda configurado con `pythonpath=.`.
+
+## v15 - UTC datetime normalization
+
+- Fixed `TypeError: can't subtract offset-naive and offset-aware datetimes` in `BotManager._supervisor_loop`.
+- MongoDB now decodes BSON datetimes as timezone-aware UTC values.
+- Supervisor normalizes legacy naive timestamps before heartbeat arithmetic.
+- `BotInfo` normalizes `last_started_at` and `last_heartbeat` from old Mongo documents.
+- Repositories that were still using `datetime.utcnow()` now write aware UTC timestamps.
+- Added regression tests for naive/aware datetime normalization.
