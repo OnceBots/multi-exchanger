@@ -1,4 +1,81 @@
-<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Multimedia Hub</title><script src="https://telegram.org/js/telegram-web-app.js"></script><style>
-:root{font-family:Inter,system-ui,sans-serif;color:#eef2ff;background:#090d19}*{box-sizing:border-box}body{margin:0;background:linear-gradient(180deg,#131d38,#090d19 70%);min-height:100vh}.wrap{max-width:600px;margin:auto;padding:16px 14px 100px}.top{display:flex;justify-content:space-between;align-items:center;padding:8px 4px 16px}.brand{font-size:22px;font-weight:900}.pill{font-size:11px;padding:7px 10px;border-radius:999px;background:#14203a;color:#76efaa}.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}.card{background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.09);border-radius:22px;padding:16px}.wide{grid-column:1/-1}.title{font-weight:800;margin-bottom:8px}.muted{color:#9aa7c4;font-size:13px;line-height:1.45}.room{margin-top:10px;padding:14px;border-radius:18px;background:#10182b;border:1px solid #1d2944}.empty{text-align:center;padding:28px;color:#8e99b4}.err{color:#ff98a7}</style></head><body><div class="wrap"><div class="top"><div class="brand">🎬 Hub</div><div class="pill">Online</div></div><div class="grid"><div class="card"><div class="title">🏠 Mis salas</div><div id="mine" class="muted">Cargando...</div></div><div class="card"><div class="title">🌎 Públicas</div><div id="public" class="muted">Cargando...</div></div><div class="card wide"><div class="title">🛡️ Privacidad</div><div class="muted">Las publicaciones de las salas se redistribuyen sin mostrar el remitente. El servicio puede procesar contenido para seguridad y moderación.</div></div></div></div><script>
-const tg=window.Telegram?.WebApp;if(tg){tg.ready();tg.expand();}const p=new URLSearchParams(location.search),botId=p.get('bot_id');const h={'X-Telegram-Init-Data':tg?.initData||''};async function load(){try{const r=await fetch('/api/child/rooms?bot_id='+encodeURIComponent(botId),{headers:h});const d=await r.json();if(!r.ok)throw new Error(d.detail||'No autorizado');render('mine',d.mine||[]);render('public',d.public||[]);}catch(e){document.getElementById('mine').innerHTML='<span class="err">'+e.message+'</span>';document.getElementById('public').textContent='';}}function render(id,rooms){const el=document.getElementById(id);if(!rooms.length){el.innerHTML='<div class="empty">No hay salas.</div>';return;}el.innerHTML=rooms.slice(0,10).map(r=>`<div class="room"><b>${esc(r.name||'Sala')}</b><div class="muted">${Number(r.member_count||0)} miembros · ${r.visibility||''}</div></div>`).join('')}function esc(s){return String(s).replace(/[&<>\"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\\':'&#39;'}[m]))}load();
-</script></body></html>
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Mini App · Salas</title>
+<script src="https://telegram.org/js/telegram-web-app.js?63"></script>
+<style>
+:root{font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#f5f7ff;background:#09101b;--card:rgba(22,32,48,.88);--card2:#132033;--border:rgba(255,255,255,.09);--muted:#94a3b8;--accent:#5aa9ff;--good:#38d39f;--danger:#ff6b7d}
+*{box-sizing:border-box}body{margin:0;min-height:100vh;background:radial-gradient(circle at top,#172841 0,#09101b 46%,#070c14 100%);padding-bottom:88px}.app{max-width:720px;margin:0 auto;padding:16px}.top{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px}.brand{font-size:21px;font-weight:900}.sub{font-size:12px;color:var(--muted);margin-top:2px}.status{padding:7px 10px;border:1px solid rgba(56,211,159,.24);background:rgba(56,211,159,.1);color:#6ef0bd;border-radius:999px;font-size:11px;font-weight:800}.hero{background:linear-gradient(135deg,rgba(90,169,255,.19),rgba(90,169,255,.04));border:1px solid rgba(90,169,255,.18);border-radius:24px;padding:18px;margin-bottom:12px}.hero h1{margin:0 0 8px;font-size:22px}.hero p{margin:0;color:#b9c6db;font-size:13px;line-height:1.5}.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}.card{background:var(--card);backdrop-filter:blur(18px);border:1px solid var(--border);border-radius:20px;padding:15px}.wide{grid-column:1/-1}.section-title{font-size:14px;font-weight:900;margin-bottom:10px}.room{padding:13px;border-radius:16px;background:var(--card2);border:1px solid var(--border);margin-bottom:9px}.room-head{display:flex;justify-content:space-between;gap:8px;align-items:flex-start}.room-name{font-weight:850}.badge{font-size:10px;font-weight:800;padding:4px 7px;border-radius:7px;background:rgba(90,169,255,.13);color:#86c3ff}.muted{color:var(--muted);font-size:12px;line-height:1.45}.actions{display:flex;gap:8px;margin-top:10px}.btn{flex:1;border:0;border-radius:12px;padding:10px 12px;color:#fff;background:#1d395b;font-weight:800;font-size:12px}.btn.primary{background:linear-gradient(135deg,#5aa9ff,#3377d8)}.btn.good{background:rgba(56,211,159,.13);border:1px solid rgba(56,211,159,.2);color:#76f1bf}.btn.danger{background:rgba(255,107,125,.12);border:1px solid rgba(255,107,125,.2);color:#ff9cab}.empty{padding:22px 10px;text-align:center;color:var(--muted);font-size:12px}.err{color:#ff9cab}.sheet{position:fixed;left:10px;right:10px;bottom:10px;background:rgba(12,19,30,.94);backdrop-filter:blur(20px);border:1px solid rgba(255,255,255,.12);border-radius:20px;padding:7px;display:grid;grid-template-columns:repeat(4,1fr);gap:5px;z-index:20}.tab{border:0;background:transparent;color:var(--muted);padding:9px 4px;border-radius:14px;font-size:11px;font-weight:800}.tab.active{background:#193252;color:#fff}.hidden{display:none!important}.toast{position:fixed;left:18px;right:18px;bottom:82px;padding:12px 14px;background:#121c2b;border:1px solid rgba(255,255,255,.1);border-radius:14px;box-shadow:0 10px 30px rgba(0,0,0,.25);font-size:12px;z-index:30}.overlay{position:fixed;inset:0;background:rgba(2,7,13,.62);display:flex;align-items:flex-end;z-index:40}.modal{width:100%;background:#101a28;border-top-left-radius:24px;border-top-right-radius:24px;border:1px solid var(--border);padding:18px}.modal h3{margin:0 0 12px}.field{width:100%;border:1px solid var(--border);background:#0b1320;color:#fff;border-radius:12px;padding:11px;margin-bottom:10px}.choice{display:flex;gap:8px;margin-bottom:10px}.choice button{flex:1}.small{font-size:11px;color:var(--muted)}
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="top"><div><div class="brand">🎬 Salas</div><div class="sub" id="bot-label">Mini App del bot</div></div><div class="status" id="status">Conectando…</div></div>
+  <div class="hero"><h1 id="welcome">Tu centro de comunidades</h1><p>Explora salas, administra las tuyas y participa compartiendo multimedia desde Telegram.</p></div>
+
+  <section id="home">
+    <div class="grid">
+      <div class="card wide"><div class="section-title">🌎 Salas públicas</div><div id="public" class="muted">Cargando…</div></div>
+      <div class="card wide"><div class="section-title">🏠 Mis salas</div><div id="mine" class="muted">Cargando…</div></div>
+    </div>
+  </section>
+
+  <section id="profileSection" class="hidden">
+    <div class="grid">
+      <div class="card"><div class="section-title">👤 Usuario</div><div id="profileName" class="muted">—</div></div>
+      <div class="card"><div class="section-title">🆔 ID</div><div id="profileId" class="muted">—</div></div>
+      <div class="card wide"><div class="section-title">🛡 Privacidad</div><div class="muted">En las salas la identidad del autor no se muestra a los demás miembros por defecto. El servicio puede procesar contenido para funciones de seguridad y moderación.</div></div>
+    </div>
+  </section>
+
+  <section id="helpSection" class="hidden">
+    <div class="card"><div class="section-title">❓ Cómo usar la Mini App</div><div class="muted">1. Explora una sala pública o crea la tuya.<br><br>2. Entra a una sala para participar.<br><br>3. Los archivos permitidos por la configuración de la sala se redistribuyen a sus miembros de forma anónima.</div></div>
+  </section>
+</div>
+
+<div class="sheet">
+  <button class="tab active" data-target="home">🏠<br>Inicio</button>
+  <button class="tab" data-target="profileSection">👤<br>Perfil</button>
+  <button class="tab" id="createBtn">➕<br>Crear</button>
+  <button class="tab" data-target="helpSection">❓<br>Ayuda</button>
+</div>
+
+<div id="createOverlay" class="overlay hidden"><div class="modal">
+  <h3>➕ Crear sala</h3>
+  <input id="roomName" class="field" maxlength="80" placeholder="Nombre de la sala">
+  <textarea id="roomDesc" class="field" maxlength="500" placeholder="Descripción"></textarea>
+  <div class="choice"><button class="btn primary" id="publicBtn">🌎 Pública</button><button class="btn" id="privateBtn">🔒 Privada</button></div>
+  <input id="roomMax" class="field" type="number" min="2" max="10000" value="100" placeholder="Máximo de miembros">
+  <input id="roomDuration" class="field" type="number" min="0" max="43200" value="0" placeholder="Duración en minutos (0 = sin vencimiento)">
+  <div class="actions"><button class="btn" id="cancelCreate">Cancelar</button><button class="btn primary" id="confirmCreate">Crear sala</button></div>
+</div></div>
+<div id="toast" class="toast hidden"></div>
+
+<script>
+const tg=window.Telegram?.WebApp;
+if(tg){try{tg.ready();tg.expand();}catch(e){}}
+const params=new URLSearchParams(location.search),hashParams=new URLSearchParams(location.hash.replace(/^#/,'')),botId=params.get('bot_id')||'',launch=hashParams.get('launch')||params.get('launch')||'';
+const initData=tg?.initData||'';
+const headers={"Content-Type":"application/json","X-Telegram-Init-Data":initData,"Authorization":initData?`tma ${initData}`:"","X-Mini-App-Launch-Token":launch};
+
+let visibility='PUBLIC';
+function show(id){document.querySelectorAll('section').forEach(s=>s.classList.add('hidden'));document.getElementById(id).classList.remove('hidden');document.querySelectorAll('.tab[data-target]').forEach(b=>b.classList.toggle('active',b.dataset.target===id));}
+function toast(msg){const t=document.getElementById('toast');t.textContent=msg;t.classList.remove('hidden');setTimeout(()=>t.classList.add('hidden'),2600)}
+function esc(v){return String(v??'').replace(/[&<>\"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','\\':'&#39;','"':'&quot;'}[m]))}
+async function api(path,options={}){const r=await fetch(path,{...options,headers:{...headers,...(options.headers||{})}});let d={};try{d=await r.json()}catch{}if(!r.ok)throw new Error(d.detail||`HTTP ${r.status}`);return d}
+function roomCard(r,joinable){const mine=(document.getElementById('mine').dataset.user||'')&&false;return `<div class="room"><div class="room-head"><div><div class="room-name">${esc(r.name||'Sala')}</div><div class="muted">${esc(r.description||'Sin descripción')}</div></div><span class="badge">${r.visibility==='PRIVATE'?'🔒 Privada':'🌎 Pública'}</span></div><div class="muted" style="margin-top:7px">👥 ${Number(r.member_count||0)}/${Number(r.max_members||0)} · ${r.expires_at?new Date(r.expires_at).toLocaleString():'Sin vencimiento'}</div><div class="actions">${joinable?`<button class="btn good" onclick="joinRoom('${esc(r.room_id)}')">➕ Unirme</button>`:`<button class="btn danger" onclick="leaveRoom('${esc(r.room_id)}')">🚪 Salir</button>`}</div></div>`}
+function renderRooms(d){document.getElementById('public').innerHTML=(d.public||[]).length?(d.public||[]).map(r=>roomCard(r,true)).join(''):'<div class="empty">No hay salas públicas todavía.</div>';document.getElementById('mine').innerHTML=(d.mine||[]).length?(d.mine||[]).map(r=>roomCard(r,false)).join(''):'<div class="empty">Todavía no perteneces a ninguna sala.</div>';const p=d.profile||{};document.getElementById('profileName').textContent=p.first_name?`${p.first_name}${p.username?` · @${p.username}`:''}`:'Usuario';document.getElementById('profileId').textContent=d.user_id||p.user_id||'—';document.getElementById('bot-label').textContent=`Bot #${botId}`;}
+async function load(){try{const d=await api(`/api/child/rooms?bot_id=${encodeURIComponent(botId)}`);renderRooms(d);document.getElementById('status').textContent=d.auth_source==='launch_token'?'Sesión segura':'Conectado';}catch(e){document.getElementById('status').textContent='Sin autorización';document.getElementById('public').innerHTML=`<div class="err">${esc(e.message)}</div>`;document.getElementById('mine').innerHTML='<div class="empty">Abre la Mini App desde el botón del bot dentro de Telegram.</div>';}}
+async function joinRoom(id){try{const d=await api(`/api/child/rooms/${encodeURIComponent(id)}/join?bot_id=${encodeURIComponent(botId)}`,{method:'POST'});toast(d.message||'Sala agregada');await load();}catch(e){toast('❌ '+e.message)}}
+async function leaveRoom(id){try{const d=await api(`/api/child/rooms/${encodeURIComponent(id)}/leave?bot_id=${encodeURIComponent(botId)}`,{method:'POST'});toast(d.message||'Has salido');await load();}catch(e){toast('❌ '+e.message)}}
+document.querySelectorAll('.tab[data-target]').forEach(b=>b.addEventListener('click',()=>show(b.dataset.target)));
+document.getElementById('createBtn').addEventListener('click',()=>document.getElementById('createOverlay').classList.remove('hidden'));
+document.getElementById('cancelCreate').addEventListener('click',()=>document.getElementById('createOverlay').classList.add('hidden'));
+document.getElementById('publicBtn').addEventListener('click',()=>{visibility='PUBLIC';document.getElementById('publicBtn').classList.add('primary');document.getElementById('privateBtn').classList.remove('primary')});
+document.getElementById('privateBtn').addEventListener('click',()=>{visibility='PRIVATE';document.getElementById('privateBtn').classList.add('primary');document.getElementById('publicBtn').classList.remove('primary')});
+document.getElementById('confirmCreate').addEventListener('click',async()=>{try{const body={name:document.getElementById('roomName').value.trim(),description:document.getElementById('roomDesc').value.trim(),visibility,max_members:Number(document.getElementById('roomMax').value||100),duration_minutes:Number(document.getElementById('roomDuration').value||0),allow_photo:true,allow_video:true,allow_files:true,allow_animation:true,allow_albums:true};if(!body.name)throw new Error('Escribe un nombre para la sala');await api(`/api/child/rooms?bot_id=${encodeURIComponent(botId)}`,{method:'POST',body:JSON.stringify(body)});document.getElementById('createOverlay').classList.add('hidden');toast('✅ Sala creada');document.getElementById('roomName').value='';document.getElementById('roomDesc').value='';await load();}catch(e){toast('❌ '+e.message)}});
+load();setInterval(load,20000);
+</script>
+</body></html>

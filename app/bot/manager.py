@@ -8,8 +8,8 @@ from collections import defaultdict, deque
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.exceptions import TelegramAPIError
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.exceptions import TelegramAPIError, TelegramUnauthorizedError
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, MenuButtonWebApp, WebAppInfo
 
 from app.bot.child_handlers import build_router as build_child_router
 from app.bot.child_factory import build_child_services
@@ -72,12 +72,25 @@ class BotManager:
         self.logger.info("master_ready username=@%s id=%s", me.username, me.id)
         from app.bot.master_handlers import build_master_router
         self.master_dp.include_router(build_master_router(self))
+        await self._configure_menu_button(
+            self.master_bot,
+            f"{self.settings.app_base_url}/master-app",
+            "🚀 Master App",
+            label="master",
+        )
         if self.settings.environment == "production":
             await self.configure_webhook(self.master_bot, self.settings.webhook_base_url + self.settings.master_webhook_path, self.settings.webhook_secret, "master", self.master_dp)
         elif self.settings.mode == "webhook":
             await self.configure_webhook(self.master_bot, self.settings.webhook_base_url + self.settings.master_webhook_path, self.settings.webhook_secret, "master", self.master_dp)
         else:
             self.system_tasks.create(self.master_dp.start_polling(self.master_bot, handle_signals=False), "master-polling")
+
+    async def _configure_menu_button(self, bot: Bot, url: str, text: str, label: str) -> None:
+        try:
+            await bot.set_chat_menu_button(menu_button=MenuButtonWebApp(text=text, web_app=WebAppInfo(url=url)))
+            self.logger.info("mini_app_menu_ready label=%s url=%s", label, url)
+        except Exception:
+            self.logger.exception("mini_app_menu_failed label=%s", label)
 
     async def configure_webhook(self, bot: Bot, url: str, secret: str, label: str, dispatcher: Dispatcher) -> None:
         allowed = dispatcher.resolve_used_update_types() or ["message", "callback_query"]
@@ -168,6 +181,13 @@ class BotManager:
                     await self.configure_webhook(bot, url, secret, f"child:{bot_id}", dispatcher)
                 else:
                     runtime.add_task(dispatcher.start_polling(bot, handle_signals=False), f"child-polling:{bot_id}")
+
+                await self._configure_menu_button(
+                    bot,
+                    f"{self.settings.app_base_url}/app?bot_id={bot_id}",
+                    "📱 Mini App",
+                    label=f"child:{bot_id}",
+                )
 
                 runtime.status = BotStatus.RUNNING
                 runtime.started_at = utcnow()
@@ -340,16 +360,44 @@ class BotManager:
                 runtime.logger.exception("heartbeat_failed")
 
     async def _supervisor_loop(self) -> None:
+        """Keep the Master and child runtimes operational without falling back to polling in production."""
         while not self.shutting_down:
             await asyncio.sleep(self.settings.supervisor_interval_seconds)
+            if self.shutting_down:
+                break
             try:
+                # Master health: Telegram session + effective webhook.
+                try:
+                    await self.master_bot.get_me()
+                    if self.settings.environment == "production" or self.settings.mode == "webhook":
+                        expected_master_url = self.settings.webhook_base_url + self.settings.master_webhook_path
+                        info = await self.master_bot.get_webhook_info()
+                        if info.url != expected_master_url or info.last_error_message:
+                            self.logger.warning(
+                                "master_webhook_repair url=%s expected=%s last_error=%s",
+                                info.url, expected_master_url, info.last_error_message,
+                            )
+                            await self.configure_webhook(
+                                self.master_bot,
+                                expected_master_url,
+                                self.settings.webhook_secret,
+                                "master",
+                                self.master_dp,
+                            )
+                except TelegramUnauthorizedError:
+                    self.logger.critical("master_token_rejected_by_telegram")
+                except Exception:
+                    self.logger.exception("master_supervisor_check_failed")
+
                 docs = await self.repositories.bots.list_enabled()
                 now = utcnow()
+                expected_long_lived_tasks = self.settings.broadcast_workers_per_bot + 3  # broadcast workers + album + admin feed + heartbeat
+
                 for doc in docs:
                     bot_id = int(doc["bot_id"])
                     runtime = self.registry.get(bot_id)
                     if runtime is None:
-                        if doc.get("status") in {BotStatus.RUNNING.value, BotStatus.STARTING.value}:
+                        if doc.get("status") in {BotStatus.RUNNING.value, BotStatus.STARTING.value, BotStatus.RESTARTING.value}:
                             try:
                                 await self.start_bot(bot_id)
                             except Exception:
@@ -358,14 +406,58 @@ class BotManager:
 
                     if runtime.status != BotStatus.RUNNING:
                         continue
+
                     heartbeat = doc.get("last_heartbeat")
                     age = age_seconds(heartbeat, now)
                     if age is not None and age > self.settings.heartbeat_interval_seconds * self.settings.heartbeat_grace_multiplier:
                         self.logger.warning("supervisor_stale_heartbeat bot_id=%s age=%.1fs", bot_id, age)
                         try:
                             await self.restart_bot(bot_id, reason="stale_heartbeat")
+                            continue
                         except Exception:
                             self.logger.exception("supervisor_restart_failed bot_id=%s", bot_id)
+
+                    if runtime.task_registry and runtime.task_registry.count < expected_long_lived_tasks:
+                        self.logger.warning(
+                            "supervisor_missing_tasks bot_id=%s expected>=%s actual=%s",
+                            bot_id, expected_long_lived_tasks, runtime.task_registry.count,
+                        )
+                        try:
+                            await self.restart_bot(bot_id, reason="missing_runtime_tasks")
+                            continue
+                        except Exception:
+                            self.logger.exception("supervisor_task_restart_failed bot_id=%s", bot_id)
+
+                    try:
+                        await runtime.bot.get_me()
+                        if self.settings.environment == "production" or self.settings.mode == "webhook":
+                            secret = self.token_service.decrypt(runtime.info.encrypted_webhook_secret)
+                            expected_url = f"{self.settings.webhook_base_url}/telegram/webhook/{bot_id}"
+                            wh = await runtime.bot.get_webhook_info()
+                            if wh.url != expected_url or wh.last_error_message:
+                                self.logger.warning(
+                                    "child_webhook_repair bot_id=%s url=%s expected=%s last_error=%s",
+                                    bot_id, wh.url, expected_url, wh.last_error_message,
+                                )
+                                await self.configure_webhook(runtime.bot, expected_url, secret, f"child:{bot_id}", runtime.dispatcher)
+                                await self._configure_menu_button(
+                                    runtime.bot,
+                                    f"{self.settings.app_base_url}/app?bot_id={bot_id}",
+                                    "📱 Mini App",
+                                    label=f"child:{bot_id}",
+                                )
+                    except TelegramUnauthorizedError as exc:
+                        self.logger.error("child_token_revoked bot_id=%s", bot_id)
+                        runtime.last_error = "Telegram rechazó el token del bot"
+                        await self.repositories.bots.update_status(bot_id, BotStatus.ERROR.value, runtime.last_error)
+                        try:
+                            await self.stop_bot(bot_id)
+                        except Exception:
+                            self.logger.exception("child_stop_after_unauthorized_failed bot_id=%s", bot_id)
+                    except TelegramAPIError:
+                        self.logger.exception("child_telegram_health_check_failed bot_id=%s", bot_id)
+                    except Exception:
+                        self.logger.exception("child_supervisor_check_failed bot_id=%s", bot_id)
             except asyncio.CancelledError:
                 raise
             except Exception:

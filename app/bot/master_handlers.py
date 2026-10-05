@@ -5,6 +5,9 @@ import html
 from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, WebAppInfo
+from urllib.parse import urlencode
+
+from app.services.webapp_auth import make_launch_token
 
 from app.services.token_service import InvalidBotTokenError
 
@@ -15,9 +18,16 @@ def build_master_router(manager) -> Router:
     def is_admin(user_id: int) -> bool:
         return user_id in manager.settings.admin_ids
 
+    def master_app_url(user_id: int) -> str:
+        params = {
+            "launch": make_launch_token(manager.settings.webhook_secret, 0, user_id, manager.settings.webapp_launch_ttl_seconds),
+        }
+        token = params["launch"]
+        return f"{manager.settings.app_base_url}/master-app#launch={urlencode({'launch': token})[7:]}"
+
     def menu(user_id: int) -> InlineKeyboardMarkup:
         rows = [
-            [InlineKeyboardButton(text="➕ Crear mi bot", web_app=WebAppInfo(url=f"{manager.settings.app_base_url}/master-app"))],
+            [InlineKeyboardButton(text="➕ Crear mi bot", web_app=WebAppInfo(url=master_app_url(user_id)))],
             [InlineKeyboardButton(text="🤖 Mis bots", callback_data="master:mine"), InlineKeyboardButton(text="📖 Cómo funciona", callback_data="master:how")],
         ]
         if is_admin(user_id):

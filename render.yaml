@@ -1,10 +1,12 @@
 services:
   - type: web
-    name: telegram-multibot-platform
-    env: docker
+    runtime: docker
+    name: telegram-p2p-vault
     plan: starter
     autoDeploy: true
     healthCheckPath: /ready
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
     envVars:
       - key: MASTER_BOT_TOKEN
         sync: false
@@ -14,25 +16,25 @@ services:
         value: telegram_multibot
       - key: WEBHOOK_BASE_URL
         sync: false
+      - key: APP_BASE_URL
+        sync: false
       - key: MASTER_WEBHOOK_PATH
         value: /telegram/webhook/master
       - key: WEBHOOK_SECRET
         sync: false
-      - key: APP_BASE_URL
+      - key: BOT_TOKEN_ENCRYPTION_KEY
         sync: false
-      - key: PORT
-        value: 10000
+      - key: ADMIN_IDS
+        sync: false
       - key: ENVIRONMENT
         value: production
       - key: MODE
         value: webhook
-      - key: ADMIN_IDS
-        sync: false
-      - key: BOT_TOKEN_ENCRYPTION_KEY
-        sync: false
       - key: LOG_LEVEL
         value: INFO
       - key: DROP_PENDING_UPDATES
         value: false
-      - key: ADMIN_FEED_ENABLED_BY_DEFAULT
-        value: true
+      - key: WEBAPP_AUTH_MAX_AGE_SECONDS
+        value: 86400
+      - key: WEBAPP_LAUNCH_TTL_SECONDS
+        value: 900

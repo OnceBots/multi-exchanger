@@ -90,23 +90,28 @@ class Settings:
     admin_feed_max_caption_length: int
     webapp_auth_max_age_seconds: int
     allow_http_localhost: bool
+    webapp_launch_ttl_seconds: int
 
     @classmethod
     def from_env(cls) -> "Settings":
-        required = (
-            "MASTER_BOT_TOKEN",
-            "MONGO_URI",
-            "DB_NAME",
-            "WEBHOOK_BASE_URL",
-            "WEBHOOK_SECRET",
-            "BOT_TOKEN_ENCRYPTION_KEY",
-        )
-        missing = [key for key in required if not os.getenv(key)]
+        master_token = (os.getenv("MASTER_BOT_TOKEN") or os.getenv("MASTER_TOKEN") or "").strip()
+        mongo_uri = (os.getenv("MONGO_URI") or "").strip()
+        db_name = (os.getenv("DB_NAME") or "telegram_multibot").strip()
+        base_url = (os.getenv("WEBHOOK_BASE_URL") or os.getenv("RENDER_EXTERNAL_URL") or "").strip().rstrip("/")
+        webhook_secret_value = (os.getenv("WEBHOOK_SECRET") or "").strip()
+        encryption_key = (os.getenv("BOT_TOKEN_ENCRYPTION_KEY") or "").strip()
+        missing_values = []
+        if not master_token: missing_values.append("MASTER_BOT_TOKEN")
+        if not mongo_uri: missing_values.append("MONGO_URI")
+        if not db_name: missing_values.append("DB_NAME")
+        if not base_url: missing_values.append("WEBHOOK_BASE_URL")
+        if not webhook_secret_value: missing_values.append("WEBHOOK_SECRET")
+        if not encryption_key: missing_values.append("BOT_TOKEN_ENCRYPTION_KEY")
+        missing = missing_values
         if missing:
             raise ConfigurationError(f"Faltan variables obligatorias: {', '.join(missing)}")
 
         environment = os.getenv("ENVIRONMENT", "production").strip().lower()
-        base_url = os.getenv("WEBHOOK_BASE_URL", "").strip().rstrip("/")
         parsed = urlparse(base_url)
         if not parsed.netloc:
             raise ConfigurationError("WEBHOOK_BASE_URL no es una URL válida")
@@ -114,13 +119,13 @@ class Settings:
             raise ConfigurationError("WEBHOOK_BASE_URL debe utilizar HTTPS en production")
         if environment != "production" and parsed.scheme not in {"http", "https"}:
             raise ConfigurationError("WEBHOOK_BASE_URL debe utilizar http o https")
-        webhook_secret = os.getenv("WEBHOOK_SECRET", "")
+        webhook_secret = webhook_secret_value
         if len(webhook_secret) < 16:
             raise ConfigurationError("WEBHOOK_SECRET debe tener al menos 16 caracteres")
         if any(char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" for char in webhook_secret):
             raise ConfigurationError("WEBHOOK_SECRET solo puede contener letras, números, _ y -")
 
-        app_base_url = os.getenv("APP_BASE_URL", base_url).strip().rstrip("/")
+        app_base_url = (os.getenv("APP_BASE_URL") or os.getenv("RENDER_EXTERNAL_URL") or base_url).strip().rstrip("/")
         app_parsed = urlparse(app_base_url)
         if not app_parsed.netloc:
             raise ConfigurationError("APP_BASE_URL no es una URL válida")
@@ -132,9 +137,9 @@ class Settings:
             raise ConfigurationError("En production MODE=webhook es obligatorio")
 
         return cls(
-            master_bot_token=os.environ["MASTER_BOT_TOKEN"],
-            mongo_uri=os.environ["MONGO_URI"],
-            db_name=os.environ["DB_NAME"],
+            master_bot_token=master_token,
+            mongo_uri=mongo_uri,
+            db_name=db_name,
             webhook_base_url=base_url,
             master_webhook_path=_path("MASTER_WEBHOOK_PATH", "/telegram/webhook/master"),
             webhook_secret=webhook_secret,
@@ -154,8 +159,8 @@ class Settings:
             ready_path=_path("READY_PATH", "/ready"),
             metrics_path=_path("METRICS_PATH", "/metrics"),
             app_base_url=app_base_url,
-            admin_ids=_csv_int("ADMIN_IDS"),
-            token_encryption_key=os.environ["BOT_TOKEN_ENCRYPTION_KEY"],
+            admin_ids=_csv_int("ADMIN_IDS") or _csv_int("SUPER_ADMINS"),
+            token_encryption_key=encryption_key,
             child_webhook_secret_length=max(16, _int("CHILD_WEBHOOK_SECRET_LENGTH", 32)),
             heartbeat_interval_seconds=max(5, _int("HEARTBEAT_INTERVAL_SECONDS", 30)),
             supervisor_interval_seconds=max(10, _int("SUPERVISOR_INTERVAL_SECONDS", 15)),
@@ -172,4 +177,5 @@ class Settings:
             admin_feed_max_caption_length=max(50, _int("ADMIN_FEED_MAX_CAPTION_LENGTH", 900)),
             webapp_auth_max_age_seconds=max(60, _int("WEBAPP_AUTH_MAX_AGE_SECONDS", 86400)),
             allow_http_localhost=_bool("ALLOW_HTTP_LOCALHOST", environment != "production"),
+            webapp_launch_ttl_seconds=max(120, _int("WEBAPP_LAUNCH_TTL_SECONDS", 900)),
         )

@@ -77,10 +77,12 @@ El sistema dispone de un **feed de moderación para `ADMIN_IDS`**. El producto m
 
 ## Mini App
 
-- `/master-app` — creación de bots hijos.
-- `/app?bot_id=...` — vista de salas del bot hijo.
-- Validación de `Telegram.WebApp.initData`.
-- Diseño mobile-first.
+- `/master-app` — Mini App real para creación de bots hijos.
+- `/app?bot_id=...` — Mini App real para salas del bot hijo.
+- Botones `web_app` y menú de Telegram `MenuButtonWebApp`.
+- Validación de `Telegram.WebApp.initData`; también acepta `Authorization: tma ...`.
+- Launch token HMAC de respaldo de corta duración para botones personalizados; se transporta en el fragmento de URL y se envía por header.
+- Diseño mobile-first con navegación, creación, join/leave, perfil y ayuda.
 
 ## Variables de entorno
 
@@ -90,12 +92,12 @@ No subas `.env` al repositorio.
 
 ## Render
 
-Render debe ejecutar el Dockerfile. El servicio expone `${PORT}` (por defecto `10000`).
+Render ejecuta el Dockerfile. La aplicación enlaza `0.0.0.0:${PORT}` y usa `10000` como valor local por defecto. En Render, `PORT` es proporcionado por la plataforma.
 
-Health check:
+Health check de proceso preparado para tráfico:
 
 ```text
-GET /health
+GET /ready
 ```
 
 Readiness real:

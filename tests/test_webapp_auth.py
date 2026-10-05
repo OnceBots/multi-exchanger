@@ -3,8 +3,13 @@ import hmac
 import json
 import time
 from urllib.parse import urlencode
+from types import SimpleNamespace
 
-from app.services.webapp_auth import validate_init_data
+from app.services.webapp_auth import (
+    authenticate_webapp_request,
+    make_launch_token,
+    validate_init_data,
+)
 
 
 def make_init_data(token: str, user: dict) -> str:
@@ -26,3 +31,12 @@ def test_webapp_auth_rejects_bad_hash():
     token = "test-bot-token"
     payload = make_init_data(token, {"id": 42, "first_name": "Test"}).replace("hash=", "hash=deadbeef")
     assert validate_init_data(payload, token, 60) is None
+
+
+def test_launch_token_roundtrip_without_init_data():
+    secret = "master-secret-for-tests"
+    token = make_launch_token(secret, 8900, 42, ttl_seconds=300)
+    request = SimpleNamespace(headers={}, query_params={"launch": token})
+    user, source = authenticate_webapp_request(request, bot_id=8900, bot_token="unused", launch_secret=secret, max_age_seconds=300)
+    assert user == {"id": 42}
+    assert source == "launch_token"

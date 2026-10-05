@@ -5,9 +5,22 @@ import html
 from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, WebAppInfo
+from urllib.parse import urlencode
+
+from app.services.webapp_auth import make_launch_token
 
 from app.core.enums import MemberRole, RoomVisibility
 from app.services.room_service import RoomService
+
+
+def _webapp_url(ctx, user_id: int) -> str:
+    params = {
+        "bot_id": str(ctx.bot_id),
+        "launch": make_launch_token(ctx.settings.webhook_secret, ctx.bot_id, user_id, ctx.settings.webapp_launch_ttl_seconds),
+    }
+    base = f"{ctx.settings.app_base_url}/app?bot_id={ctx.bot_id}"
+    token = params["launch"]
+    return f"{base}#launch={urlencode({'launch': token})[7:]}"
 
 
 def _menu(ctx, user_id: int) -> InlineKeyboardMarkup:
@@ -15,7 +28,7 @@ def _menu(ctx, user_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="➕ Crear sala", callback_data="room:create"), InlineKeyboardButton(text="🌎 Explorar", callback_data="room:public")],
         [InlineKeyboardButton(text="🏠 Mis salas", callback_data="room:mine"), InlineKeyboardButton(text="🚪 Unirse", callback_data="room:join")],
         [InlineKeyboardButton(text="👤 Mi perfil", callback_data="profile"), InlineKeyboardButton(text="❓ Ayuda", callback_data="help")],
-        [InlineKeyboardButton(text="📱 Abrir Mini App", web_app=WebAppInfo(url=f"{ctx.settings.app_base_url}/app?bot_id={ctx.bot_id}"))],
+        [InlineKeyboardButton(text="📱 Abrir Mini App", web_app=WebAppInfo(url=_webapp_url(ctx, user_id)))],
     ]
     if user_id in ctx.settings.admin_ids:
         rows.append([InlineKeyboardButton(text="🛡️ Moderación", callback_data="admin:panel")])
