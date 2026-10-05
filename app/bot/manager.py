@@ -81,9 +81,24 @@ class BotManager:
     async def bootstrap_children(self) -> None:
         for doc in await self.repositories.bots.list_enabled():
             bot_id = int(doc["bot_id"])
-            asyncio.create_task(self.start_bot(bot_id))
-        self.supervisor_task = asyncio.create_task(self._supervisor_loop())
-        self.room_cleanup_task = asyncio.create_task(self._room_cleanup_loop())
+            task = asyncio.create_task(self.start_bot(bot_id), name=f"child-start:{bot_id}")
+            task.add_done_callback(self._child_start_done)
+        self.supervisor_task = asyncio.create_task(self._supervisor_loop(), name="bot-supervisor")
+        self.room_cleanup_task = asyncio.create_task(self._room_cleanup_loop(), name="room-cleanup")
+
+    def _child_start_done(self, task: asyncio.Task) -> None:
+        """Consume bootstrap task exceptions so one bad child cannot kill startup.
+
+        ``start_bot`` persists the ERROR state on failure; here we only make sure
+        the exception is observed and logged instead of producing
+        ``Task exception was never retrieved`` noise.
+        """
+        try:
+            exc = task.exception()
+        except asyncio.CancelledError:
+            return
+        if exc is not None:
+            self.logger.error("child_bootstrap_failed error=%s", exc, exc_info=exc)
 
     async def register_bot(self, token: str, owner_id: int, metadata: dict | None = None) -> BotInfo:
         """Public child creation API used by chat and Master Mini App."""

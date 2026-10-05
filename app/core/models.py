@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, ClassVar
 
 from app.core.enums import BotStatus
 
@@ -16,6 +16,24 @@ class BotConfig:
     features: dict[str, bool] = field(default_factory=lambda: {"media": True, "rooms": True, "webapp": True})
     language: str = "es"
     max_members_default: int = 100
+
+    _KNOWN_FIELDS: ClassVar[frozenset[str]] = frozenset({
+        "features",
+        "language",
+        "max_members_default",
+    })
+
+    @classmethod
+    def from_mapping(cls, raw: dict[str, Any] | None) -> "BotConfig":
+        """Load config defensively so older Mongo documents cannot crash startup.
+
+        The platform has evolved its configuration schema over time (for example,
+        older documents may contain fields such as ``platform_name``). Unknown
+        fields are intentionally ignored while known fields retain their values.
+        """
+        data = raw or {}
+        filtered = {key: data[key] for key in cls._KNOWN_FIELDS if key in data}
+        return cls(**filtered)
 
 
 @dataclass(slots=True)
@@ -35,7 +53,7 @@ class BotInfo:
 
     @classmethod
     def from_document(cls, doc: dict[str, Any]) -> "BotInfo":
-        config = BotConfig(**doc.get("config", {}))
+        config = BotConfig.from_mapping(doc.get("config"))
         return cls(
             bot_id=int(doc["bot_id"]),
             username=doc.get("username", ""),
