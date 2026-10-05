@@ -19,3 +19,9 @@ class BotContext:
     services: Any
     repositories: Any
     config: Any
+
+    @property
+    def bot_username(self) -> str:
+        """Username cached from Telegram getMe() when the runtime was started."""
+        username = getattr(getattr(self.runtime, "info", None), "username", "")
+        return str(username or "")

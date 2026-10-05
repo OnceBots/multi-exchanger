@@ -105,7 +105,7 @@ def build_router(ctx) -> Router:
         feed_count = await ctx.repositories.admin_feed.count(ctx.bot_id) if admin else 0
         status = "🛰 Feed administrativo activo" if admin and feed_count else ""
         text = (
-            f"<b>🎬 {html.escape('@' + (ctx.bot.username or 'MULTIMEDIA HUB'))}</b>\n"
+            f"<b>🎬 {html.escape('@' + (ctx.bot_username or 'MULTIMEDIA HUB'))}</b>\n"
             "<i>Tu espacio para compartir y descubrir contenido</i>\n\n"
             "<b>✨ Accesos rápidos</b>\n"
             "🌎 Explorar comunidades\n"
@@ -239,7 +239,7 @@ def build_router(ctx) -> Router:
         await callback.answer()
         try:
             await callback.message.edit_text(
-                f"<b>🎬 @{html.escape(ctx.bot.username or 'MULTIMEDIA HUB')}</b>\n\nSelecciona una opción:",
+                f"<b>🎬 @{html.escape(ctx.bot_username or 'MULTIMEDIA HUB')}</b>\n\nSelecciona una opción:",
                 reply_markup=menu_kb(ctx, int(callback.from_user.id)),
             )
         except Exception:
@@ -368,7 +368,7 @@ def build_router(ctx) -> Router:
         room = await ctx.repositories.room.get(ctx.bot_id, room_id)
         if not room:
             await callback.answer("Sala no disponible", show_alert=True); return
-        url = await ctx.services.room.build_share_url(ctx.bot.username, room["invite_code"])
+        url = await ctx.services.room.build_share_url(ctx.bot_username, room["invite_code"])
         await callback.answer("Enlace listo")
         await callback.message.answer(f"🔗 <b>Compartir sala</b>\n\n<code>{html.escape(url)}</code>")
 
