@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Comunidad · Contribución</title>
+<script src="https://telegram.org/js/telegram-web-app.js?63"></script>
+<style>
+:root{font-family:Inter,system-ui,sans-serif;color-scheme:dark;--bg:#0b1018;--card:#141b26;--muted:#91a0b5}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:#f5f7fb}main{max-width:720px;margin:auto;padding:18px}.hero{padding:8px 2px 18px}.muted{color:var(--muted)}.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}.card{background:var(--card);border:1px solid #253145;border-radius:18px;padding:15px}.value{font-size:25px;font-weight:900;margin-top:4px}.section{margin-top:12px}.row{display:flex;justify-content:space-between;gap:10px;align-items:center}.pill{display:inline-block;border-radius:999px;padding:6px 10px;background:#1b2637;color:#bcd6ff;font-size:12px}.item{padding:12px 0;border-bottom:1px solid #253145}.item:last-child{border-bottom:0}.btn{border:0;border-radius:13px;padding:11px 13px;background:#1a2432;color:white;font-weight:800;cursor:pointer}.btn.primary{background:#2f6fd1}.btn.danger{background:#8e2637}.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}.err{color:#ff8f9a}.hidden{display:none}.topbar{display:flex;gap:8px;overflow:auto;margin-bottom:12px}.tab{white-space:nowrap}
+</style>
+</head>
+<body>
+<main>
+  <div class="hero"><div class="muted" id="botLabel">Comunidad</div><h1 style="margin:4px 0">🤝 Contribución</h1><div class="muted">Aporta, gana reputación y obtén créditos para seguir participando.</div></div>
+  <div class="topbar"><button class="btn tab" data-screen="profile">👤 Perfil</button><button class="btn tab" data-screen="ranking">🏆 Ranking</button><button class="btn tab" data-screen="rules">📖 Reglas</button><button class="btn tab hidden" id="moderationTab" data-screen="moderation">🛡️ Moderación</button></div>
+  <section id="profile"></section>
+  <section id="ranking" class="hidden"></section>
+  <section id="rules" class="hidden"><div class="card"><h2>📖 Cómo funciona</h2><p>Los aportes válidos pasan por moderación cuando corresponde. Los aportes aprobados aumentan tus créditos y reputación. Las descargas consumen créditos. El spam, los duplicados y el abuso pueden provocar penalizaciones.</p></div></section>
+  <section id="moderation" class="hidden"></section>
+  <div id="error" class="section"></div>
+</main>
+<script>
+const tg=window.Telegram?.WebApp;if(tg){try{tg.ready();tg.expand()}catch(e){}}
+const p=new URLSearchParams(location.search),botId=p.get('bot_id')||'',userId=p.get('user_id')||p.get('id')||'',launch=p.get('launch')||'';
+function headers(){const d=tg?.initData||'';return {'Content-Type':'application/json','X-Telegram-Init-Data':d,'Authorization':d?`tma ${d}`:'','X-Mini-App-Launch-Token':launch,'X-Telegram-User-Id':userId}}
+async function api(path,opt={}){const sep=path.includes('?')?'&':'?';const r=await fetch(`${path}${sep}bot_id=${encodeURIComponent(botId)}&user_id=${encodeURIComponent(userId)}&id=${encodeURIComponent(userId)}`,{...opt,headers:{...headers(),...(opt.headers||{})}});const d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(d.detail||`HTTP ${r.status}`);return d}
+function esc(s){return String(s??'').replace(/[&<>\"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','\\':'&#39;','"':'&quot;'}[m]))}
+function show(name){document.querySelectorAll('section').forEach(x=>x.classList.add('hidden'));document.getElementById(name).classList.remove('hidden');load(name)}
+document.querySelectorAll('.tab').forEach(b=>b.onclick=()=>show(b.dataset.screen));
+async function load(screen='profile'){document.getElementById('error').textContent='';try{if(screen==='profile'){const d=await api('/api/child/contribution/profile');const x=d.profile||{};document.getElementById('profile').innerHTML=`<div class="grid"><div class="card"><div class="muted">💰 Créditos</div><div class="value">${x.credits||0}</div></div><div class="card"><div class="muted">⭐ Reputación</div><div class="value">${x.reputation||0}</div></div><div class="card"><div class="muted">📤 Aportes aprobados</div><div class="value">${x.approved_contributions||0}</div></div><div class="card"><div class="muted">📥 Descargas</div><div class="value">${x.downloads||0}</div></div></div><div class="card section"><div class="row"><strong>Nivel</strong><span class="pill">${esc(x.level)}</span></div><div class="row section"><span class="muted">Ratio aporte/consumo</span><strong>${x.ratio||0}</strong></div></div>`}else if(screen==='ranking'){const d=await api('/api/child/contribution/leaderboard');document.getElementById('ranking').innerHTML=`<div class="card"><h2 style="margin-top:0">🏆 Top colaboradores</h2>${(d.leaderboard||[]).map((x,i)=>`<div class="item"><div class="row"><strong>#${i+1} ${esc(x.username||x.first_name||x.user_id)}</strong><span>⭐ ${x.reputation||0}</span></div><div class="muted">📤 ${x.approved_contributions||0} aportes · 💰 ${x.credits||0} créditos</div></div>`).join('')||'<div class="muted">Todavía no hay datos.</div>'}</div>`}else if(screen==='moderation'){const d=await api('/api/child/moderation');const pending=(d.pending||[]).map(x=>`<div class="item"><div><b>${esc(x.media_type)}</b> · usuario <code>${x.uploader_id}</code></div><div class="muted"><code>${x.contribution_id}</code></div><div class="actions"><button class="btn primary" onclick="decision('${x.contribution_id}','approve')">✅ Aprobar</button><button class="btn danger" onclick="decision('${x.contribution_id}','reject')">❌ Rechazar</button></div></div>`).join('')||'<div class="muted">Sin pendientes.</div>';document.getElementById('moderation').innerHTML=`<div class="card"><h2 style="margin-top:0">🛡️ Moderación</h2><div class="grid"><div><div class="muted">Pendientes</div><div class="value">${d.stats.pending_contributions}</div></div><div><div class="muted">Reportes</div><div class="value">${d.stats.open_reports}</div></div></div><div class="section">${pending}</div></div>`}}catch(e){document.getElementById('error').innerHTML=`<div class="err">${esc(e.message)}</div>`}}
+async function decision(id,action){try{await api(`/api/child/moderation/contributions/${encodeURIComponent(id)}/${action}`,{method:'POST'});await load('moderation')}catch(e){alert(e.message)}}
+(async()=>{try{const d=await api('/api/child/contribution/profile');document.getElementById('botLabel').textContent=d.profile?.bot_username||'Comunidad'}catch{};try{await api('/api/child/moderation');document.getElementById('moderationTab').classList.remove('hidden')}catch{}load('profile')})();
+</script>
+</body>
+</html>
