@@ -10,6 +10,7 @@ class BotStatus(StrEnum):
     STOPPED = "STOPPED"
     RESTARTING = "RESTARTING"
     ERROR = "ERROR"
+    AUTH_ERROR = "AUTH_ERROR"
     DISABLED = "DISABLED"
     ARCHIVED = "ARCHIVED"
 

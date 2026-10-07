@@ -85,5 +85,37 @@ class BotRepository:
             }},
         )
 
+
+    async def mark_auth_error(self, bot_id: int, error: str) -> None:
+        now = utcnow()
+        await self.col.update_one(
+            {"bot_id": int(bot_id)},
+            {"$set": {
+                "status": "AUTH_ERROR",
+                "enabled": False,
+                "last_error": error,
+                "updated_at": now,
+                "auth_error_at": now,
+            }},
+        )
+
+    async def replace_token(self, bot_id: int, encrypted_token: str, username: str, first_name: str) -> None:
+        now = utcnow()
+        await self.col.update_one(
+            {"bot_id": int(bot_id)},
+            {"$set": {
+                "token_encrypted": encrypted_token,
+                "username": username,
+                "first_name": first_name,
+                "enabled": True,
+                "status": "STARTING",
+                "last_error": None,
+                "auth_error_at": None,
+                "updated_at": now,
+            }},
+        )
+
     async def delete(self, bot_id: int) -> None:
         await self.col.delete_one({"bot_id": int(bot_id)})
+
+

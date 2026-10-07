@@ -57,6 +57,9 @@ class BotManager:
         self.restart_history: dict[int, deque[float]] = defaultdict(deque)
         self.shutting_down = False
         self.ready = False
+        # Avoid webhook-repair storms when another process is competing for the same token.
+        self._webhook_repair_last: dict[str, float] = {}
+        self._webhook_repair_history: dict[str, deque[float]] = defaultdict(deque)
         self.master_bot = Bot(settings.master_bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
         self.master_dp = Dispatcher()
 
@@ -129,6 +132,10 @@ class BotManager:
             bot_id = int(doc["bot_id"])
             try:
                 await self.start_bot(bot_id)
+            except TelegramUnauthorizedError:
+                failures += 1
+                await self._mark_auth_error(bot_id, "Telegram rechazó el token almacenado")
+                self.logger.error("child_bootstrap_auth_error bot_id=%s", bot_id)
             except Exception:
                 failures += 1
                 self.logger.exception("child_bootstrap_failed bot_id=%s", bot_id)
@@ -215,6 +222,42 @@ class BotManager:
             raise ValueError("Bot no encontrado")
         return BotInfo.from_document(doc)
 
+    async def _mark_auth_error(self, bot_id: int, error: str) -> None:
+        runtime = self.registry.get(int(bot_id))
+        if runtime:
+            runtime.last_error = error
+            try:
+                await runtime.stop()
+            except Exception:
+                self.logger.exception("auth_error_runtime_stop_failed bot_id=%s", bot_id)
+            self.registry.pop(int(bot_id), None)
+        await self.repositories.bots.mark_auth_error(int(bot_id), error)
+
+    async def replace_bot_token(self, bot_id: int, token: str, actor_id: int) -> BotInfo:
+        info = await self.get_info(bot_id)
+        if int(actor_id) != info.owner_id and int(actor_id) not in self.settings.admin_ids:
+            raise PermissionError("No autorizado para actualizar el token de este bot")
+
+        new_bot_id, username, first_name = await self.token_service.validate_token(token)
+        if int(new_bot_id) != int(bot_id):
+            raise ValueError("El token enviado pertenece a otro bot. Debes usar el token del mismo bot registrado.")
+
+        if bot_id in self.registry:
+            try:
+                await self.stop_bot(bot_id)
+            except Exception:
+                self.logger.exception("token_rotation_stop_failed bot_id=%s", bot_id)
+
+        await self.repositories.bots.replace_token(
+            bot_id,
+            self.token_service.encrypt(token.strip()),
+            username,
+            first_name,
+        )
+        result = await self.start_bot(bot_id)
+        self.logger.info("child_token_rotated bot_id=%s actor_id=%s username=@%s result=%s", bot_id, actor_id, username, result)
+        return await self.get_info(bot_id)
+
     async def start_bot(self, bot_id: int) -> str:
         async with self.lock:
             if bot_id in self.registry and self.registry[bot_id].status in {BotStatus.STARTING, BotStatus.RUNNING, BotStatus.RESTARTING}:
@@ -273,6 +316,13 @@ class BotManager:
                 runtime.add_task(self._replay_pending_updates(bot_id), f"replay:{bot_id}")
                 self.logger.info("child_bot_running bot_id=%s username=@%s", bot_id, me.username)
                 return f"bot {bot_id} RUNNING"
+            except TelegramUnauthorizedError:
+                runtime.status = BotStatus.AUTH_ERROR
+                runtime.last_error = "Telegram rechazó el token del bot"
+                await runtime.stop()
+                self.registry.pop(bot_id, None)
+                await self.repositories.bots.mark_auth_error(bot_id, runtime.last_error)
+                raise
             except Exception as exc:
                 runtime.status = BotStatus.ERROR
                 runtime.last_error = str(exc)[:1000]
@@ -456,6 +506,21 @@ class BotManager:
             except Exception:
                 runtime.logger.exception("heartbeat_failed")
 
+    async def _webhook_repair_allowed(self, key: str) -> bool:
+        now = time.monotonic()
+        cooldown = max(30, int(self.settings.supervisor_interval_seconds * 4))
+        last = self._webhook_repair_last.get(key, 0.0)
+        if now - last < cooldown:
+            return False
+        self._webhook_repair_last[key] = now
+        history = self._webhook_repair_history[key]
+        history.append(now)
+        while history and now - history[0] > 600:
+            history.popleft()
+        if len(history) >= 3:
+            self.logger.critical("webhook_conflict_suspected key=%s repairs_last_10m=%s; verify no second process/polling instance is using this bot token", key, len(history))
+        return True
+
     async def _supervisor_loop(self) -> None:
         """Keep the Master and child runtimes operational without falling back to polling in production."""
         while not self.shutting_down:
@@ -469,7 +534,7 @@ class BotManager:
                     if self.settings.environment == "production" or self.settings.mode == "webhook":
                         expected_master_url = self.settings.webhook_base_url + self.settings.master_webhook_path
                         info = await self.master_bot.get_webhook_info()
-                        if info.url != expected_master_url:
+                        if info.url != expected_master_url and await self._webhook_repair_allowed("master"):
                             self.logger.warning(
                                 "master_webhook_repair url=%s expected=%s last_error=%s",
                                 info.url, expected_master_url, info.last_error_message,
@@ -531,7 +596,7 @@ class BotManager:
                             secret = self.token_service.decrypt(runtime.info.encrypted_webhook_secret)
                             expected_url = f"{self.settings.webhook_base_url}/telegram/webhook/{bot_id}"
                             wh = await runtime.bot.get_webhook_info()
-                            if wh.url != expected_url:
+                            if wh.url != expected_url and await self._webhook_repair_allowed(f"child:{bot_id}"):
                                 self.logger.warning(
                                     "child_webhook_repair bot_id=%s url=%s expected=%s last_error=%s",
                                     bot_id, wh.url, expected_url, wh.last_error_message,
@@ -543,14 +608,9 @@ class BotManager:
                                     "📱 Mini App",
                                     label=f"child:{bot_id}",
                                 )
-                    except TelegramUnauthorizedError as exc:
+                    except TelegramUnauthorizedError:
                         self.logger.error("child_token_revoked bot_id=%s", bot_id)
-                        runtime.last_error = "Telegram rechazó el token del bot"
-                        await self.repositories.bots.update_status(bot_id, BotStatus.ERROR.value, runtime.last_error)
-                        try:
-                            await self.stop_bot(bot_id)
-                        except Exception:
-                            self.logger.exception("child_stop_after_unauthorized_failed bot_id=%s", bot_id)
+                        await self._mark_auth_error(bot_id, "Telegram rechazó el token del bot")
                     except TelegramAPIError:
                         self.logger.exception("child_telegram_health_check_failed bot_id=%s", bot_id)
                     except Exception:
