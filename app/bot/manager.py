@@ -63,7 +63,31 @@ class BotManager:
         self.master_bot = build_bot(settings.master_bot_token, settings, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
         self.master_dp = Dispatcher()
 
+    @property
+    def super_admin_id(self) -> int:
+        return int(getattr(self.settings, "super_admin_id", 0) or 0)
+
+    def is_super_admin(self, user_id: int) -> bool:
+        return self.super_admin_id > 0 and int(user_id) == self.super_admin_id
+
+    async def set_storage_channel(self, channel_id: str) -> None:
+        channel_id = str(channel_id).strip()
+        if not channel_id.lstrip("-").isdigit() or not channel_id.startswith("-"):
+            raise ValueError("Enviá el ID numérico del canal, normalmente empieza con -100.")
+        await self.mongo.collection("platform_settings").update_one(
+            {"_id": "global"},
+            {"$set": {"storage_channel_id": channel_id, "updated_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc)}},
+            upsert=True,
+        )
+        # Settings is frozen to prevent accidental changes; this explicit controlled update
+        # is the runtime configuration path shared by every child bot.
+        object.__setattr__(self.settings, "storage_channel_id", channel_id)
+
     async def start(self) -> None:
+        # The channel is configurable from the Master chat and persists in MongoDB.
+        saved = await self.mongo.collection("platform_settings").find_one({"_id": "global"})
+        if saved and saved.get("storage_channel_id"):
+            object.__setattr__(self.settings, "storage_channel_id", str(saved["storage_channel_id"]))
         await self._start_master()
         await self._bootstrap_children()
         self.ready = True

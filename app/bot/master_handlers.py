@@ -30,14 +30,18 @@ def build_master_router(manager) -> Router:
     def is_admin(user_id: int) -> bool:
         return user_id in manager.settings.admin_ids
 
+    def is_super_admin(user_id: int) -> bool:
+        return manager.is_super_admin(user_id)
+
     def menu(user_id: int) -> InlineKeyboardMarkup:
         rows = [
             [InlineKeyboardButton(text="➕ Crear mi bot", callback_data="master:create")],
             [InlineKeyboardButton(text="🤖 Mis bots", callback_data="master:mine"), InlineKeyboardButton(text="📖 Cómo funciona", callback_data="master:how")],
         ]
         if is_admin(user_id):
-            rows.append([InlineKeyboardButton(text="🖼️ Miniatura de videos", callback_data="master:thumbnail")])
             rows.append([InlineKeyboardButton(text="🛡️ Administración", callback_data="master:list")])
+        if is_super_admin(user_id):
+            rows.append([InlineKeyboardButton(text="⚙️ Configuración global", callback_data="master:global-config")])
         return InlineKeyboardMarkup(inline_keyboard=rows)
 
     async def begin_create(target: Message, user_id: int) -> None:
@@ -168,8 +172,8 @@ def build_master_router(manager) -> Router:
         await callback.message.edit_text("<b>🤖 Mis bots</b>", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
     async def request_thumbnail(target: Message, user_id: int) -> None:
-        if not is_admin(user_id):
-            await target.answer("⛔ Solo los administradores del Master pueden cambiar la miniatura.")
+        if not is_super_admin(user_id):
+            await target.answer("⛔ Solo el superadministrador puede cambiar la miniatura.")
             return
         await manager.repositories.session.set(0, user_id, "set_video_thumbnail", {})
         await target.answer(
@@ -178,6 +182,15 @@ def build_master_router(manager) -> Router:
             "Se ajustará automáticamente a JPG, máximo 320×320 y menos de 200 KB.\n\n"
             "La miniatura será global para los bots hijos y se aplicará a las próximas subidas de video."
         )
+
+    @router.message(Command("storage_channel"))
+    async def storage_channel_command(message: Message) -> None:
+        uid = int(message.from_user.id) if message.from_user else 0
+        if not is_super_admin(uid):
+            await message.answer("⛔ Solo el superadministrador puede configurar el canal.")
+            return
+        await manager.repositories.session.set(0, uid, "set_storage_channel", {})
+        await message.answer("Enviá el ID numérico del canal de almacenamiento (por ejemplo, -1001234567890).")
 
     @router.message(Command("thumbnail"))
     async def thumbnail_command(message: Message) -> None:
@@ -197,9 +210,9 @@ def build_master_router(manager) -> Router:
         session = await manager.repositories.session.get(0, uid)
         if not session or session.get("step") != "set_video_thumbnail":
             return
-        if not is_admin(uid):
+        if not is_super_admin(uid):
             await manager.repositories.session.clear(0, uid)
-            await message.answer("⛔ No autorizado.")
+            await message.answer("⛔ Solo el superadministrador puede cambiar la miniatura.")
             return
         try:
             photo = message.photo[-1]
@@ -220,6 +233,42 @@ def build_master_router(manager) -> Router:
                 "❌ No pude guardar esa imagen. Probá enviarla como foto JPG/PNG.\n"
                 f"Detalle: <code>{html.escape(str(exc)[:250])}</code>"
             )
+
+    @router.callback_query(F.data == "master:global-config")
+    async def global_config(callback: CallbackQuery) -> None:
+        uid = int(callback.from_user.id)
+        if not is_super_admin(uid):
+            await _safe_callback_answer(callback, "Solo el superadministrador", show_alert=True)
+            return
+        await _safe_callback_answer(callback)
+        current = str(manager.settings.storage_channel_id or "No configurado")
+        rows = [
+            [InlineKeyboardButton(text="📦 Configurar canal de almacenamiento", callback_data="master:storage-channel")],
+            [InlineKeyboardButton(text="🖼️ Cambiar miniatura de videos", callback_data="master:thumbnail")],
+            [InlineKeyboardButton(text="↩️ Inicio", callback_data="master:home")],
+        ]
+        await callback.message.edit_text(
+            "<b>⚙️ CONFIGURACIÓN GLOBAL</b>\n\n"
+            f"📦 Canal actual: <code>{html.escape(current)}</code>\n"
+            "🖼️ Miniatura: compartida por todos los bots hijos.\n\n"
+            "El canal se guarda en MongoDB y no requiere editar .env ni reiniciar. "
+            "Cada bot hijo que suba videos debe tener permisos de administrador en ese canal.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+        )
+
+    @router.callback_query(F.data == "master:storage-channel")
+    async def storage_channel_request(callback: CallbackQuery) -> None:
+        uid = int(callback.from_user.id)
+        if not is_super_admin(uid):
+            await _safe_callback_answer(callback, "Solo el superadministrador", show_alert=True)
+            return
+        await _safe_callback_answer(callback)
+        await manager.repositories.session.set(0, uid, "set_storage_channel", {})
+        await callback.message.answer(
+            "<b>📦 Canal de almacenamiento</b>\n\n"
+            "Enviá el ID numérico del canal (normalmente empieza con <code>-100</code>).\n"
+            "Agregá todos los bots hijos que vayan a procesar videos como administradores del canal, con permiso para publicar."
+        )
 
     @router.callback_query(F.data == "master:list")
     async def admin_list(callback: CallbackQuery) -> None:
@@ -344,6 +393,23 @@ def build_master_router(manager) -> Router:
         session = await manager.repositories.session.get(0, uid)
         if not session:
             await message.answer("Usa /start para abrir el panel.", reply_markup=menu(uid))
+            return
+        if session.get("step") == "set_storage_channel":
+            if not is_super_admin(uid):
+                await manager.repositories.session.clear(0, uid)
+                await message.answer("⛔ No autorizado.")
+                return
+            try:
+                await manager.set_storage_channel(message.text.strip())
+                await manager.repositories.session.clear(0, uid)
+                await message.answer(
+                    "✅ <b>Canal de almacenamiento guardado</b>\n\n"
+                    f"ID: <code>{html.escape(str(manager.settings.storage_channel_id))}</code>\n"
+                    "La configuración se guardó en MongoDB y ya está disponible para los bots hijos. "
+                    "Recordá dar permisos de administrador a cada bot hijo en ese canal."
+                )
+            except Exception as exc:
+                await message.answer(f"❌ {html.escape(str(exc)[:250])}")
             return
         if session.get("step") != "create_child_token":
             return

@@ -98,7 +98,8 @@ class Settings:
     ready_path: str
     metrics_path: str
     admin_ids: frozenset[int]
-    token_encryption_key: str
+    super_admin_id: int
+    token_encryption_key
     child_webhook_secret_length: int
     heartbeat_interval_seconds: int
     supervisor_interval_seconds: int
@@ -131,6 +132,9 @@ class Settings:
         if not Path(thumbnail_setting).is_absolute():
             thumbnail_setting = str(Path(__file__).resolve().parent.parent / thumbnail_setting)
         encryption_key = (os.getenv("BOT_TOKEN_ENCRYPTION_KEY") or "").strip()
+        configured_admin_ids = _csv_int("ADMIN_IDS") or _csv_int("SUPER_ADMINS")
+        fallback_super_admin = min(configured_admin_ids) if configured_admin_ids else 0
+        super_admin_id = _int("SUPER_ADMIN_ID", fallback_super_admin)
         missing_values = []
         if not master_token: missing_values.append("MASTER_BOT_TOKEN")
         if not mongo_uri: missing_values.append("MONGO_URI")
@@ -196,7 +200,8 @@ class Settings:
             health_path=_path("HEALTH_PATH", "/health"),
             ready_path=_path("READY_PATH", "/ready"),
             metrics_path=_path("METRICS_PATH", "/metrics"),
-            admin_ids=_csv_int("ADMIN_IDS") or _csv_int("SUPER_ADMINS"),
+            admin_ids=configured_admin_ids,
+            super_admin_id=super_admin_id,
             token_encryption_key=encryption_key,
             child_webhook_secret_length=max(16, _int("CHILD_WEBHOOK_SECRET_LENGTH", 32)),
             heartbeat_interval_seconds=max(5, _int("HEARTBEAT_INTERVAL_SECONDS", 30)),

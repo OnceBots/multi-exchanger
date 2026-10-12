@@ -18,9 +18,7 @@ class BroadcastService:
         self.semaphore = asyncio.Semaphore(ctx.settings.broadcast_concurrency_per_bot)
         self.video_thumbnail_pipeline = VideoThumbnailPipeline(ctx)
         self.video_thumbnail_enabled = self.video_thumbnail_pipeline.is_configured()
-        if not self.ctx.settings.storage_channel_id:
-            self.logger.warning("video_thumbnail_pipeline_disabled reason=CANAL_STORAGE_ID_missing")
-        elif not self.video_thumbnail_enabled:
+        if not self.video_thumbnail_enabled:
             self.logger.warning(
                 "video_thumbnail_pipeline_disabled reason=configuration_invalid_or_tmpfs_unavailable"
             )

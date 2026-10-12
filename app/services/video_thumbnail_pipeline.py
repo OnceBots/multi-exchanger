@@ -130,8 +130,6 @@ class VideoThumbnailPipeline:
 
     def is_configured(self) -> bool:
         settings = self.ctx.settings
-        if not getattr(settings, "storage_channel_id", ""):
-            return False
         if not getattr(settings, "telegram_api_local_mode", False):
             return False
         thumbnail_value = getattr(settings, "video_thumbnail_path", "")
