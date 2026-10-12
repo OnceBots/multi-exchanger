@@ -217,40 +217,37 @@ def build_master_router(manager) -> Router:
         try:
             photo = message.photo[-1]
             image_buffer = BytesIO()
-
-            # The local Telegram Bot API returns filesystem-relative paths (e.g.
-            # photos/file_1.jpg). aiogram's normal download helper may reject
-            # those paths because it expects a URL-relative file path. Read the
-            # file directly from the shared local Bot API data directory when
-            # available; retain the standard download path for remote Bot API.
             file_info = await manager.master_bot.get_file(photo.file_id)
             file_path = file_info.file_path
-            local_api_root = __import__("pathlib").Path(
-                __import__("os").getenv("LOCAL_BOT_API_DATA_DIR", "/root/tg-bot-api/data")
-            ).resolve()
-            if file_path:
-                from pathlib import Path
-                relative_path = Path(file_path)
-                candidate = (local_api_root / relative_path).resolve()
-                try:
-                    candidate.relative_to(local_api_root)
-                    safe_local_path = candidate.is_file()
-                except ValueError:
-                    safe_local_path = False
-            else:
-                safe_local_path = False
+            if not file_path:
+                raise ValueError("Telegram no devolvió la ruta de la imagen.")
 
-            if safe_local_path:
-                image_buffer.write(candidate.read_bytes())
+            if manager.settings.telegram_api_local_mode:
+                # Local Bot API file_path can be relative (e.g. photos/file_1.jpg).
+                # Fetch through the Bot API /file endpoint instead of treating it
+                # as a path on the host filesystem; the API container owns that path.
+                import aiohttp
+                from urllib.parse import quote
+
+                base_url = manager.settings.telegram_api_base_url.rstrip("/")
+                token = manager.settings.master_bot_token
+                encoded_path = quote(file_path.lstrip("/"), safe="/")
+                file_url = f"{base_url}/file/bot{token}/{encoded_path}"
+                timeout = aiohttp.ClientTimeout(total=30, connect=10)
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.get(file_url) as response:
+                        if response.status != 200:
+                            raise ValueError(
+                                f"El Bot API local no pudo descargar la imagen (HTTP {response.status})."
+                            )
+                        if response.content_length and response.content_length > 10 * 1024 * 1024:
+                            raise ValueError("La imagen supera el límite de 10 MB.")
+                        data = await response.content.read(10 * 1024 * 1024 + 1)
+                        if len(data) > 10 * 1024 * 1024:
+                            raise ValueError("La imagen supera el límite de 10 MB.")
+                        image_buffer.write(data)
             else:
-                try:
-                    await manager.master_bot.download(photo.file_id, destination=image_buffer)
-                except ValueError as download_error:
-                    raise ValueError(
-                        "No se pudo leer la foto desde el Bot API local. "
-                        "Verificá que LOCAL_BOT_API_DATA_DIR apunte al directorio compartido "
-                        "de datos del contenedor tg-local-api."
-                    ) from download_error
+                await manager.master_bot.download(photo.file_id, destination=image_buffer)
 
             saved_path = save_default_video_thumbnail(
                 image_buffer.getvalue(), manager.settings.video_thumbnail_path
