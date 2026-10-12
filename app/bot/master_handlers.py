@@ -217,7 +217,41 @@ def build_master_router(manager) -> Router:
         try:
             photo = message.photo[-1]
             image_buffer = BytesIO()
-            await manager.master_bot.download(photo.file_id, destination=image_buffer)
+
+            # The local Telegram Bot API returns filesystem-relative paths (e.g.
+            # photos/file_1.jpg). aiogram's normal download helper may reject
+            # those paths because it expects a URL-relative file path. Read the
+            # file directly from the shared local Bot API data directory when
+            # available; retain the standard download path for remote Bot API.
+            file_info = await manager.master_bot.get_file(photo.file_id)
+            file_path = file_info.file_path
+            local_api_root = __import__("pathlib").Path(
+                __import__("os").getenv("LOCAL_BOT_API_DATA_DIR", "/root/tg-bot-api/data")
+            ).resolve()
+            if file_path:
+                from pathlib import Path
+                relative_path = Path(file_path)
+                candidate = (local_api_root / relative_path).resolve()
+                try:
+                    candidate.relative_to(local_api_root)
+                    safe_local_path = candidate.is_file()
+                except ValueError:
+                    safe_local_path = False
+            else:
+                safe_local_path = False
+
+            if safe_local_path:
+                image_buffer.write(candidate.read_bytes())
+            else:
+                try:
+                    await manager.master_bot.download(photo.file_id, destination=image_buffer)
+                except ValueError as download_error:
+                    raise ValueError(
+                        "No se pudo leer la foto desde el Bot API local. "
+                        "Verificá que LOCAL_BOT_API_DATA_DIR apunte al directorio compartido "
+                        "de datos del contenedor tg-local-api."
+                    ) from download_error
+
             saved_path = save_default_video_thumbnail(
                 image_buffer.getvalue(), manager.settings.video_thumbnail_path
             )
