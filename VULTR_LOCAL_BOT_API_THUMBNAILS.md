@@ -19,7 +19,7 @@ VIDEO_MAX_UPLOAD_BYTES=2000000000
 VIDEO_RAMDISK_RESERVE_BYTES=536870912
 ```
 
-`WEBHOOK_BASE_URL` y `APP_BASE_URL` deben seguir usando la URL pública HTTPS de tu VPS/dominio. `TELEGRAM_API_BASE_URL` es solamente la URL privada del Bot API local; no reemplaces la URL pública de webhooks por localhost.
+`WEBHOOK_BASE_URL` debe usar la URL pública HTTPS de tu VPS. La administración ocurre en el chat de Telegram, así que no se necesita `APP_BASE_URL`. `TELEGRAM_API_BASE_URL` es solamente la URL privada del Bot API local; no reemplaces la URL pública de webhooks por localhost.
 
 ## Configuración del canal buffer
 

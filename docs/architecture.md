@@ -8,13 +8,11 @@ Un fallo en un child se registra como error de ese runtime y no cierra el Master
 
 ## 2. One HTTP server
 
-FastAPI monta todas las rutas:
+FastAPI monta las rutas operativas y de webhook:
 
 - `/health`
 - `/ready`
 - `/metrics`
-- `/master-app`
-- `/app`
 - `/telegram/webhook/master`
 - `/telegram/webhook/{bot_id}`
 

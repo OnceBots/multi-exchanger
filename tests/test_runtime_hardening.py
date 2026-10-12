@@ -8,15 +8,17 @@ def test_render_uses_docker_runtime_and_readiness_without_hardcoded_port():
     assert "key: PORT" not in text
 
 
-def test_child_menu_is_mini_app_button():
+def test_child_menu_uses_telegram_chat_buttons():
     text = Path("app/bot/child_handlers.py").read_text(encoding="utf-8")
-    assert "web_app=WebAppInfo" in text
+    assert 'callback_data="room:create"' in text
+    assert "WebAppInfo" not in text
 
 
-def test_manager_configures_menu_button_webapp():
+def test_manager_has_no_webapp_menu():
     text = Path("app/bot/manager.py").read_text(encoding="utf-8")
-    assert "MenuButtonWebApp" in text
-    assert "set_chat_menu_button" in text
+    assert "MenuButtonWebApp" not in text
+    assert "set_chat_menu_button" not in text
+
 
 def test_manager_skips_callback_queries_during_replay() -> None:
     source = Path("app/bot/manager.py").read_text(encoding="utf-8")

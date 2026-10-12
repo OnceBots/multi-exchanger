@@ -15,7 +15,6 @@ Descomprime el ZIP en la raíz del repositorio para que existan directamente `ap
 - `WEBHOOK_SECRET`
 - `ADMIN_IDS`
 - `BOT_TOKEN_ENCRYPTION_KEY`
-- `APP_BASE_URL`
 
 En producción:
 

@@ -97,7 +97,6 @@ class Settings:
     health_path: str
     ready_path: str
     metrics_path: str
-    app_base_url: str
     admin_ids: frozenset[int]
     token_encryption_key: str
     child_webhook_secret_length: int
@@ -114,9 +113,7 @@ class Settings:
     album_debounce_ms: int
     admin_feed_enabled_by_default: bool
     admin_feed_max_caption_length: int
-    webapp_auth_max_age_seconds: int
     allow_http_localhost: bool
-    webapp_launch_ttl_seconds: int
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -159,11 +156,6 @@ class Settings:
         if any(char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" for char in webhook_secret):
             raise ConfigurationError("WEBHOOK_SECRET solo puede contener letras, números, _ y -")
 
-        app_base_url = (os.getenv("APP_BASE_URL") or os.getenv("RENDER_EXTERNAL_URL") or base_url).strip().rstrip("/")
-        app_parsed = urlparse(app_base_url)
-        if not app_parsed.netloc:
-            raise ConfigurationError("APP_BASE_URL no es una URL válida")
-
         mode = os.getenv("MODE", "webhook").strip().lower()
         if mode not in {"webhook", "polling"}:
             raise ConfigurationError("MODE debe ser webhook o polling")
@@ -204,7 +196,6 @@ class Settings:
             health_path=_path("HEALTH_PATH", "/health"),
             ready_path=_path("READY_PATH", "/ready"),
             metrics_path=_path("METRICS_PATH", "/metrics"),
-            app_base_url=app_base_url,
             admin_ids=_csv_int("ADMIN_IDS") or _csv_int("SUPER_ADMINS"),
             token_encryption_key=encryption_key,
             child_webhook_secret_length=max(16, _int("CHILD_WEBHOOK_SECRET_LENGTH", 32)),
@@ -221,7 +212,5 @@ class Settings:
             album_debounce_ms=max(250, _int("ALBUM_DEBOUNCE_MS", 900)),
             admin_feed_enabled_by_default=_bool("ADMIN_FEED_ENABLED_BY_DEFAULT", True),
             admin_feed_max_caption_length=max(50, _int("ADMIN_FEED_MAX_CAPTION_LENGTH", 900)),
-            webapp_auth_max_age_seconds=max(60, _int("WEBAPP_AUTH_MAX_AGE_SECONDS", 86400)),
             allow_http_localhost=_bool("ALLOW_HTTP_LOCALHOST", environment != "production"),
-            webapp_launch_ttl_seconds=max(120, _int("WEBAPP_LAUNCH_TTL_SECONDS", 900)),
         )

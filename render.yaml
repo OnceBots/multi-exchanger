@@ -16,8 +16,6 @@ services:
         value: telegram_multibot
       - key: WEBHOOK_BASE_URL
         sync: false
-      - key: APP_BASE_URL
-        sync: false
       - key: MASTER_WEBHOOK_PATH
         value: /telegram/webhook/master
       - key: WEBHOOK_SECRET
@@ -34,7 +32,3 @@ services:
         value: INFO
       - key: DROP_PENDING_UPDATES
         value: false
-      - key: WEBAPP_AUTH_MAX_AGE_SECONDS
-        value: 86400
-      - key: WEBAPP_LAUNCH_TTL_SECONDS
-        value: 900

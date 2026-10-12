@@ -1,15 +1,13 @@
 from __future__ import annotations
 
-import time
 import html
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, MenuButtonWebApp, Message, WebAppInfo
-from urllib.parse import quote, urlencode
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from urllib.parse import quote
 from datetime import timedelta
 
-from app.services.webapp_auth import make_launch_token
 
 from app.core.enums import MemberRole, RoomVisibility
 from app.services.room_service import RoomService
@@ -27,53 +25,11 @@ async def _safe_callback_answer(callback: CallbackQuery, *args, **kwargs) -> Non
         if "query is too old" in message or "query id is invalid" in message or "response timeout expired" in message:
             return
         raise
-def _webapp_url(ctx, user_id: int) -> str:
-    # Match the proven Mini App launch pattern used by aprovebot.py:
-    # identify the child/user in the query string and keep a signed token as
-    # the authenticated fallback when Telegram does not expose initData.
-    token = make_launch_token(
-        ctx.settings.webhook_secret,
-        ctx.bot_id,
-        user_id,
-        ctx.settings.webapp_launch_ttl_seconds,
-    )
-    # Same personalized URL shape used by the proven aprovebot.py Mini App.
-    # Keep both user_id and id for compatibility with older clients.
-    params = {
-        "bot": ctx.bot_username or str(ctx.bot_id),
-        "bot_id": str(ctx.bot_id),
-        "user_id": str(user_id),
-        "id": str(user_id),
-        "v": str(int(time.time())),
-        "launch": token,
-    }
-    return f"{ctx.settings.app_base_url}/app?{urlencode(params)}"
-
-
-async def _configure_user_miniapp_menu(ctx, user_id: int) -> None:
-    """Attach a personalized Mini App launcher to this private chat.
-
-    Telegram already provides validated WebApp.initData to Mini Apps. The
-    personalized menu URL adds a short-lived signed fallback token for clients
-    that expose the Mini App without the raw initData value.
-    """
-    try:
-        url = _webapp_url(ctx, user_id)
-        await ctx.bot.set_chat_menu_button(
-            chat_id=user_id,
-            menu_button=MenuButtonWebApp(text="📱 Mini App", web_app=WebAppInfo(url=url)),
-        )
-        ctx.logger.info("mini_app_user_menu_ready bot_id=%s user_id=%s", ctx.bot_id, user_id)
-    except Exception:
-        ctx.logger.exception("mini_app_user_menu_failed bot_id=%s user_id=%s", ctx.bot_id, user_id)
-
-
 def _menu(ctx, user_id: int) -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton(text="➕ Crear sala", callback_data="room:create"), InlineKeyboardButton(text="🌎 Explorar", callback_data="room:public")],
         [InlineKeyboardButton(text="🏠 Mis salas", callback_data="room:mine"), InlineKeyboardButton(text="🚪 Unirse", callback_data="room:join")],
         [InlineKeyboardButton(text="👤 Mi perfil", callback_data="profile"), InlineKeyboardButton(text="❓ Ayuda", callback_data="help")],
-        [InlineKeyboardButton(text="📱 Abrir Mini App", web_app=WebAppInfo(url=_webapp_url(ctx, user_id)))],
     ]
     if user_id == ctx.owner_id:
         rows.append([InlineKeyboardButton(text="⏱️ Temporizador", callback_data="bot:lifecycle"), InlineKeyboardButton(text="🗑️ Eliminar bot", callback_data="bot:deletehelp")])
@@ -163,8 +119,6 @@ def build_router(ctx) -> Router:
         if message.from_user:
             await ctx.repositories.user.upsert_from_telegram(ctx.bot_id, message.from_user)
         uid = int(message.from_user.id) if message.from_user else 0
-        if uid:
-            await _configure_user_miniapp_menu(ctx, uid)
         parts = (message.text or "").split(maxsplit=1)
         payload = parts[1].strip() if len(parts) > 1 else ""
         if payload.startswith("room_") and uid:
@@ -197,7 +151,7 @@ def build_router(ctx) -> Router:
             if not cfg.get("owner_onboarding_sent"):
                 onboarding = (
                     "<b>✅ BOT PROPIO ACTIVO</b>\n\n"
-                    "Este es tu bot hijo. Puedes crear salas, compartir enlaces y usar la Mini App.\n\n"
+                    "Este es tu bot hijo. Puedes crear salas, compartir enlaces y administrar todo desde este chat.\n\n"
                     "⏱️ El temporizador está en modo manual por defecto.\n"
                     "🗑️ Si decides eliminarlo definitivamente, usa el botón <b>🗑️ Eliminar bot</b> y sigue los pasos de @BotFather."
                 )
