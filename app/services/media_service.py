@@ -53,7 +53,13 @@ class MediaService:
             return False
 
         if message.media_group_id and media_type in {"photo", "video"}:
-            item = {"message_id": int(message.message_id), "file_id": file_id, "type": media_type}
+            item = {
+                "message_id": int(message.message_id),
+                "file_id": file_id,
+                "type": media_type,
+                "file_size": int(getattr(message.video if media_type == "video" else message.photo[-1], "file_size", 0) or 0),
+                "file_name": getattr(message.video, "file_name", None) if media_type == "video" else None,
+            }
             await self.ctx.repositories.media.append_group(self.ctx.bot_id, room_id, str(message.media_group_id), item, user_id, message.caption)
             key = (room_id, user_id, str(message.media_group_id))
             old = self.album_tasks.pop(key, None)
@@ -74,6 +80,8 @@ class MediaService:
             "media_type": media_type,
             "file_id": file_id,
             "caption": message.caption,
+            "file_size": int(getattr(message.video, "file_size", 0) or 0) if media_type == "video" else 0,
+            "file_name": getattr(message.video, "file_name", None) if media_type == "video" else None,
         })
         await self.ctx.admin_feed_queue.put({"sender_id": user_id, "media_type": media_type, "file_id": file_id, "caption": message.caption})
         return True

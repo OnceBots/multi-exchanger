@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from urllib.parse import urlparse
 
 from dotenv import load_dotenv
@@ -18,6 +19,19 @@ def _bool(name: str, default: bool = False) -> bool:
     if raw is None:
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ConfigurationError(f"{name} debe ser un número válido") from exc
+    if value < 0:
+        raise ConfigurationError(f"{name} no puede ser negativo")
+    return value
 
 
 def _int(name: str, default: int) -> int:
@@ -63,6 +77,18 @@ class Settings:
     service_name: str
     drop_pending_updates: bool
     telegram_max_connections: int
+    telegram_api_base_url: str
+    telegram_api_local_mode: bool
+    telegram_api_timeout_seconds: int
+    telegram_api_server_files_root: str
+    telegram_api_host_files_root: str
+    storage_channel_id: str
+    video_ramdisk_path: str
+    video_require_tmpfs: bool
+    video_thumbnail_path: str
+    video_delivery_delay_seconds: float
+    video_max_upload_bytes: int
+    video_ramdisk_reserve_bytes: int
     mongo_server_selection_timeout_ms: int
     mongo_connect_timeout_ms: int
     mongo_socket_timeout_ms: int
@@ -99,6 +125,14 @@ class Settings:
         db_name = (os.getenv("DB_NAME") or "telegram_multibot").strip()
         base_url = (os.getenv("WEBHOOK_BASE_URL") or os.getenv("RENDER_EXTERNAL_URL") or "").strip().rstrip("/")
         webhook_secret_value = (os.getenv("WEBHOOK_SECRET") or "").strip()
+        telegram_api_base_url = (os.getenv("TELEGRAM_API_BASE_URL") or "http://127.0.0.1:8081").strip().rstrip("/")
+        telegram_api_parsed = urlparse(telegram_api_base_url)
+        if not telegram_api_parsed.netloc or telegram_api_parsed.scheme not in {"http", "https"}:
+            raise ConfigurationError("TELEGRAM_API_BASE_URL debe ser una URL http/https válida")
+        storage_channel_id = (os.getenv("CANAL_STORAGE_ID") or os.getenv("CHANNEL_STORAGE_ID") or "").strip()
+        thumbnail_setting = (os.getenv("VIDEO_THUMBNAIL_PATH") or str(Path(__file__).resolve().parent.parent / "assets" / "thumb.jpg")).strip()
+        if not Path(thumbnail_setting).is_absolute():
+            thumbnail_setting = str(Path(__file__).resolve().parent.parent / thumbnail_setting)
         encryption_key = (os.getenv("BOT_TOKEN_ENCRYPTION_KEY") or "").strip()
         missing_values = []
         if not master_token: missing_values.append("MASTER_BOT_TOKEN")
@@ -150,6 +184,18 @@ class Settings:
             service_name=os.getenv("SERVICE_NAME", "telegram-multibot-platform"),
             drop_pending_updates=_bool("DROP_PENDING_UPDATES", False),
             telegram_max_connections=_int("TELEGRAM_MAX_CONNECTIONS", 20),
+            telegram_api_base_url=telegram_api_base_url,
+            telegram_api_local_mode=_bool("TELEGRAM_API_LOCAL_MODE", True),
+            telegram_api_timeout_seconds=max(60, _int("TELEGRAM_API_TIMEOUT_SECONDS", 7200)),
+            telegram_api_server_files_root=_path("TELEGRAM_API_SERVER_FILES_ROOT", "/root/tg-bot-api/data"),
+            telegram_api_host_files_root=_path("TELEGRAM_API_HOST_FILES_ROOT", "/root/tg-bot-api/data"),
+            storage_channel_id=storage_channel_id,
+            video_ramdisk_path=_path("VIDEO_RAMDISK_PATH", "/mnt/ramdisk"),
+            video_require_tmpfs=_bool("VIDEO_REQUIRE_TMPFS", True),
+            video_thumbnail_path=thumbnail_setting,
+            video_delivery_delay_seconds=min(0.25, _float("VIDEO_DELIVERY_DELAY_SECONDS", 0.04)),
+            video_max_upload_bytes=max(1_000_000, _int("VIDEO_MAX_UPLOAD_BYTES", 2_000_000_000)),
+            video_ramdisk_reserve_bytes=max(0, _int("VIDEO_RAMDISK_RESERVE_BYTES", 536_870_912)),
             mongo_server_selection_timeout_ms=_int("MONGO_SERVER_SELECTION_TIMEOUT_MS", 5000),
             mongo_connect_timeout_ms=_int("MONGO_CONNECT_TIMEOUT_MS", 10000),
             mongo_socket_timeout_ms=_int("MONGO_SOCKET_TIMEOUT_MS", 10000),

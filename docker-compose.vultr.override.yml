@@ -1,0 +1,16 @@
+# Opcional: usarlo SOLO si la aplicación Python también corre dentro de Docker.
+# Si ejecutas app.main directamente en el host, conserva TELEGRAM_API_BASE_URL=http://127.0.0.1:8081.
+services:
+  app:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      TELEGRAM_API_BASE_URL: http://host.docker.internal:8081
+      TELEGRAM_API_LOCAL_MODE: "true"
+      TELEGRAM_API_SERVER_FILES_ROOT: /root/tg-bot-api/data
+      TELEGRAM_API_HOST_FILES_ROOT: /root/tg-bot-api/data
+      VIDEO_RAMDISK_PATH: /mnt/ramdisk
+      VIDEO_REQUIRE_TMPFS: "true"
+    volumes:
+      - /mnt/ramdisk:/mnt/ramdisk
+      - /root/tg-bot-api/data:/root/tg-bot-api/data:ro

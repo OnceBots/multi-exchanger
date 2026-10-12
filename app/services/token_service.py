@@ -3,6 +3,8 @@ from __future__ import annotations
 import secrets
 
 from aiogram import Bot
+
+from app.bot.api_client import build_bot
 from aiogram.exceptions import TelegramNetworkError, TelegramUnauthorizedError
 
 from app.core.crypto import SecretBox
@@ -13,9 +15,10 @@ class InvalidBotTokenError(ValueError):
 
 
 class TokenService:
-    def __init__(self, box: SecretBox, secret_length: int = 32) -> None:
+    def __init__(self, box: SecretBox, secret_length: int = 32, settings=None) -> None:
         self.box = box
         self.secret_length = secret_length
+        self.settings = settings
 
     @staticmethod
     def validate_format(token: str) -> None:
@@ -25,7 +28,7 @@ class TokenService:
 
     async def validate_token(self, token: str) -> tuple[int, str, str]:
         self.validate_format(token)
-        bot = Bot(token=token.strip())
+        bot = build_bot(token, self.settings) if self.settings is not None else Bot(token=token.strip())
         try:
             me = await bot.get_me()
             return int(me.id), me.username or "", me.first_name or "Bot"

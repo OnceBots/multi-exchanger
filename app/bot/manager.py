@@ -12,6 +12,7 @@ from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramAPIError, TelegramUnauthorizedError, TelegramBadRequest
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, MenuButtonWebApp, WebAppInfo
 
+from app.bot.api_client import build_bot
 from app.bot.child_handlers import build_router as build_child_router
 from app.bot.child_factory import build_child_services
 from app.bot.runtime import BotRuntime
@@ -48,7 +49,7 @@ class BotManager:
         self.settings = settings
         self.mongo = mongo
         self.repositories = RepositoryBundle(mongo)
-        self.token_service = TokenService(secret_box, settings.child_webhook_secret_length)
+        self.token_service = TokenService(secret_box, settings.child_webhook_secret_length, settings=settings)
         self.provisioner = ChildBotProvisioner(self)
         self.registry: dict[int, BotRuntime] = {}
         self.logger = logging.getLogger("bot.manager")
@@ -57,7 +58,9 @@ class BotManager:
         self.restart_history: dict[int, deque[float]] = defaultdict(deque)
         self.shutting_down = False
         self.ready = False
-        self.master_bot = Bot(settings.master_bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+        self._webhook_repair_last: dict[str, float] = {}
+        self._webhook_repair_history: dict[str, deque[float]] = defaultdict(deque)
+        self.master_bot = build_bot(settings.master_bot_token, settings, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
         self.master_dp = Dispatcher()
 
     async def start(self) -> None:
@@ -130,7 +133,11 @@ class BotManager:
             try:
                 await self.start_bot(bot_id)
             except TelegramUnauthorizedError:
-                await self.archive_bot(bot_id, reason="telegram_deleted")
+                failures += 1
+                try:
+                    await self.archive_bot(bot_id, reason="telegram_deleted")
+                except Exception:
+                    self.logger.exception("child_archive_after_unauthorized_failed bot_id=%s", bot_id)
                 self.logger.warning("child_archived_after_telegram_unauthorized bot_id=%s", bot_id)
             except Exception:
                 failures += 1
@@ -232,7 +239,7 @@ class BotManager:
             info = BotInfo.from_document(doc)
             token = self.token_service.decrypt(info.encrypted_token)
             secret = self.token_service.decrypt(info.encrypted_webhook_secret)
-            bot = Bot(token=token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+            bot = build_bot(token, self.settings, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
             dispatcher = Dispatcher()
             runtime = BotRuntime(info=info, bot=bot, dispatcher=dispatcher, status=BotStatus.STARTING)
             runtime.broadcast_queue = asyncio.Queue(maxsize=self.settings.room_queue_maxsize)
@@ -459,6 +466,25 @@ class BotManager:
             except Exception:
                 runtime.logger.exception("heartbeat_failed")
 
+    async def _webhook_repair_allowed(self, key: str) -> bool:
+        """Rate-limit repairs and flag external processes competing for a token."""
+        now = time.monotonic()
+        cooldown = max(30, int(self.settings.supervisor_interval_seconds * 4))
+        last = self._webhook_repair_last.get(key, 0.0)
+        if now - last < cooldown:
+            return False
+        self._webhook_repair_last[key] = now
+        history = self._webhook_repair_history[key]
+        history.append(now)
+        while history and now - history[0] > 600:
+            history.popleft()
+        if len(history) >= 3:
+            self.logger.critical(
+                "webhook_conflict_suspected key=%s repairs_last_10m=%s; verify there is no second process or polling instance for this token",
+                key, len(history),
+            )
+        return True
+
     async def _supervisor_loop(self) -> None:
         """Keep the Master and child runtimes operational without falling back to polling in production."""
         while not self.shutting_down:
@@ -472,7 +498,7 @@ class BotManager:
                     if self.settings.environment == "production" or self.settings.mode == "webhook":
                         expected_master_url = self.settings.webhook_base_url + self.settings.master_webhook_path
                         info = await self.master_bot.get_webhook_info()
-                        if info.url != expected_master_url:
+                        if info.url != expected_master_url and await self._webhook_repair_allowed("master"):
                             self.logger.warning(
                                 "master_webhook_repair url=%s expected=%s last_error=%s",
                                 info.url, expected_master_url, info.last_error_message,
@@ -501,7 +527,10 @@ class BotManager:
                             try:
                                 await self.start_bot(bot_id)
                             except TelegramUnauthorizedError:
-                                await self.archive_bot(bot_id, reason="telegram_deleted")
+                                try:
+                                    await self.archive_bot(bot_id, reason="telegram_deleted")
+                                except Exception:
+                                    self.logger.exception("child_archive_after_unauthorized_failed bot_id=%s", bot_id)
                                 self.logger.warning("child_archived_after_telegram_unauthorized bot_id=%s", bot_id)
                             except Exception:
                                 self.logger.exception("supervisor_start_failed bot_id=%s", bot_id)
@@ -537,7 +566,7 @@ class BotManager:
                             secret = self.token_service.decrypt(runtime.info.encrypted_webhook_secret)
                             expected_url = f"{self.settings.webhook_base_url}/telegram/webhook/{bot_id}"
                             wh = await runtime.bot.get_webhook_info()
-                            if wh.url != expected_url:
+                            if wh.url != expected_url and await self._webhook_repair_allowed(f"child:{bot_id}"):
                                 self.logger.warning(
                                     "child_webhook_repair bot_id=%s url=%s expected=%s last_error=%s",
                                     bot_id, wh.url, expected_url, wh.last_error_message,
