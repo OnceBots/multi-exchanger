@@ -133,8 +133,18 @@ class Settings:
             thumbnail_setting = str(Path(__file__).resolve().parent.parent / thumbnail_setting)
         encryption_key = (os.getenv("BOT_TOKEN_ENCRYPTION_KEY") or "").strip()
         configured_admin_ids = _csv_int("ADMIN_IDS") or _csv_int("SUPER_ADMINS")
-        fallback_super_admin = min(configured_admin_ids) if configured_admin_ids else 0
-        super_admin_id = _int("SUPER_ADMIN_ID", fallback_super_admin)
+        # The first/only configured ADMIN_IDS entry is the global superadministrator.
+        # Keep this tied to ADMIN_IDS so no separate SUPER_ADMIN_ID is required.
+        raw_admin_ids = (os.getenv("ADMIN_IDS") or os.getenv("SUPER_ADMINS") or "").split(",")
+        first_admin_id = 0
+        for admin_value in raw_admin_ids:
+            if admin_value.strip():
+                try:
+                    first_admin_id = int(admin_value.strip())
+                except ValueError:
+                    pass  # _csv_int below raises the authoritative configuration error.
+                break
+        super_admin_id = first_admin_id
         missing_values = []
         if not master_token: missing_values.append("MASTER_BOT_TOKEN")
         if not mongo_uri: missing_values.append("MONGO_URI")
