@@ -6,7 +6,8 @@ Este archivo describe el overlay de cambios. Extrae el ZIP desde la raíz del re
 
 - `.env.example`: nuevas variables para Bot API local, canal buffer, tmpfs y thumbnail.
 - `Dockerfile`: incluye `assets/` en la imagen de la aplicación.
-- `docker-compose.vultr.override.yml`: configuración opcional cuando la aplicación también corre dentro de Docker.
+- `docker-compose.yml`: publicación del puerto de aplicación solo en loopback y configuración orientada a MongoDB externo ya existente.
+- `docker-compose.vultr.override.yml`: conecta la aplicación y el Bot API local mediante una red Docker externa compartida y monta el volumen de archivos en solo lectura.
 - `app/config.py`: carga y valida la configuración de Vultr.
 - `app/bot/api_client.py`: cliente `AiohttpSession`/`TelegramAPIServer.from_base` y mapeo entre rutas del Bot API y las visibles para Python.
 - `app/bot/manager.py` y `app/services/token_service.py`: usan el cliente configurado para Master, bots hijos y validación de tokens; conservan el manejo de lifecycle/recuperación de webhook incorporado en la última versión de referencia utilizada.
@@ -15,7 +16,8 @@ Este archivo describe el overlay de cambios. Extrae el ZIP desde la raíz del re
 - `app/services/video_thumbnail_pipeline.py`: procesa una vez vídeos y vídeos dentro de álbumes, copia desde el volumen del Bot API en hilo hacia tmpfs, agrega thumbnail y limpia archivos temporales.
 - `app/services/bot_lifecycle.py`: conserva el texto de notificación cuando Telegram devuelve `Unauthorized` porque el usuario eliminó su bot.
 - `assets/thumb.jpg` y `assets/README.md`: thumbnail de muestra que debes reemplazar por la corporativa.
-- `VULTR_LOCAL_BOT_API_THUMBNAILS.md`: guía de configuración, permisos, red y validación.
+- `VULTR_LOCAL_BOT_API_THUMBNAILS.md` y `VULTR_DEPLOY_GUIDE.md`: configuración, despliegue, red, migración de tokens y validación.
+- `scripts/migrate_cloud_tokens_to_local_api.py`: dry-run por defecto y migración explícita de tokens existentes a la Bot API local sin imprimirlos.
 - `tests/test_vultr_api_client.py`, `tests/test_video_thumbnail_pipeline.py` y `tests/test_video_broadcast_copy.py`: tests del addon.
 
 ## Configuración necesaria
