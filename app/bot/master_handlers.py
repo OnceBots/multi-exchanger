@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import html
 from io import BytesIO
 
@@ -31,7 +32,8 @@ def build_master_router(manager) -> Router:
         return user_id in manager.settings.admin_ids
 
     def is_super_admin(user_id: int) -> bool:
-        return manager.is_super_admin(user_id)
+        # Global Master settings are authorized by the configured ADMIN_IDS.
+        return user_id in manager.settings.admin_ids
 
     def menu(user_id: int) -> InlineKeyboardMarkup:
         rows = [
@@ -223,29 +225,51 @@ def build_master_router(manager) -> Router:
                 raise ValueError("Telegram no devolvió la ruta de la imagen.")
 
             if manager.settings.telegram_api_local_mode:
-                # Local Bot API file_path can be relative (e.g. photos/file_1.jpg).
-                # Fetch through the Bot API /file endpoint instead of treating it
-                # as a path on the host filesystem; the API container owns that path.
-                import aiohttp
-                from urllib.parse import quote
+                # In local Bot API mode getFile may return a relative path such as
+                # "photos/file_1.jpg". Resolve it against the configured Bot API
+                # data root, then map the same relative location to the host-visible
+                # root. Do not build an HTTP /file URL: this deployment's local file
+                # paths are already available through the shared data directory.
+                from pathlib import Path
 
-                base_url = manager.settings.telegram_api_base_url.rstrip("/")
-                token = manager.settings.master_bot_token
-                encoded_path = quote(file_path.lstrip("/"), safe="/")
-                file_url = f"{base_url}/file/bot{token}/{encoded_path}"
-                timeout = aiohttp.ClientTimeout(total=30, connect=10)
-                async with aiohttp.ClientSession(timeout=timeout) as session:
-                    async with session.get(file_url) as response:
-                        if response.status != 200:
-                            raise ValueError(
-                                f"El Bot API local no pudo descargar la imagen (HTTP {response.status})."
-                            )
-                        if response.content_length and response.content_length > 10 * 1024 * 1024:
-                            raise ValueError("La imagen supera el límite de 10 MB.")
-                        data = await response.content.read(10 * 1024 * 1024 + 1)
-                        if len(data) > 10 * 1024 * 1024:
-                            raise ValueError("La imagen supera el límite de 10 MB.")
-                        image_buffer.write(data)
+                server_root = Path(
+                    manager.settings.telegram_api_server_files_root
+                ).expanduser().resolve()
+                host_root = Path(
+                    manager.settings.telegram_api_host_files_root
+                ).expanduser().resolve()
+                returned_path = Path(file_path)
+                server_path = (
+                    returned_path if returned_path.is_absolute()
+                    else server_root / returned_path
+                ).resolve()
+                try:
+                    relative_path = server_path.relative_to(server_root)
+                except ValueError as exc:
+                    raise ValueError(
+                        "La ruta devuelta por el Bot API queda fuera de su directorio de datos."
+                    ) from exc
+
+                local_path = (host_root / relative_path).resolve()
+                try:
+                    local_path.relative_to(host_root)
+                except ValueError as exc:
+                    raise ValueError(
+                        "La ruta de la imagen queda fuera del directorio local permitido."
+                    ) from exc
+
+                if not local_path.is_file():
+                    raise FileNotFoundError(
+                        "No encuentro la foto en el volumen compartido del Bot API: "
+                        f"{relative_path.as_posix()}. Verificá TELEGRAM_API_SERVER_FILES_ROOT "
+                        "y TELEGRAM_API_HOST_FILES_ROOT."
+                    )
+                if local_path.stat().st_size > 10 * 1024 * 1024:
+                    raise ValueError("La imagen supera el límite de 10 MB.")
+                data = await asyncio.to_thread(local_path.read_bytes)
+                if len(data) > 10 * 1024 * 1024:
+                    raise ValueError("La imagen supera el límite de 10 MB.")
+                image_buffer.write(data)
             else:
                 await manager.master_bot.download(photo.file_id, destination=image_buffer)
 
