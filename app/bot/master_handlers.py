@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+from io import BytesIO
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
@@ -9,6 +10,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 
 from app.services.token_service import InvalidBotTokenError
 from app.services.bot_lifecycle import botfather_instructions, schedule_label
+from app.services.thumbnail_settings import save_default_video_thumbnail
 
 
 
@@ -34,6 +36,7 @@ def build_master_router(manager) -> Router:
             [InlineKeyboardButton(text="🤖 Mis bots", callback_data="master:mine"), InlineKeyboardButton(text="📖 Cómo funciona", callback_data="master:how")],
         ]
         if is_admin(user_id):
+            rows.append([InlineKeyboardButton(text="🖼️ Miniatura de videos", callback_data="master:thumbnail")])
             rows.append([InlineKeyboardButton(text="🛡️ Administración", callback_data="master:list")])
         return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -163,6 +166,60 @@ def build_master_router(manager) -> Router:
         rows = [[InlineKeyboardButton(text=f"🤖 @{doc.get('username') or doc['bot_id']}", callback_data=f"master:botinfo:{doc['bot_id']}")] for doc in docs[:30]]
         rows.append([InlineKeyboardButton(text="↩️ Inicio", callback_data="master:home")])
         await callback.message.edit_text("<b>🤖 Mis bots</b>", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+
+    async def request_thumbnail(target: Message, user_id: int) -> None:
+        if not is_admin(user_id):
+            await target.answer("⛔ Solo los administradores del Master pueden cambiar la miniatura.")
+            return
+        await manager.repositories.session.set(0, user_id, "set_video_thumbnail", {})
+        await target.answer(
+            "<b>🖼️ Miniatura predeterminada de videos</b>\n\n"
+            "Enviá ahora la imagen como <b>foto</b> (no como archivo).\n"
+            "Se ajustará automáticamente a JPG, máximo 320×320 y menos de 200 KB.\n\n"
+            "La miniatura será global para los bots hijos y se aplicará a las próximas subidas de video."
+        )
+
+    @router.message(Command("thumbnail"))
+    async def thumbnail_command(message: Message) -> None:
+        if message.from_user:
+            await request_thumbnail(message, int(message.from_user.id))
+
+    @router.callback_query(F.data == "master:thumbnail")
+    async def thumbnail_callback(callback: CallbackQuery) -> None:
+        await _safe_callback_answer(callback)
+        await request_thumbnail(callback.message, int(callback.from_user.id))
+
+    @router.message(F.photo)
+    async def thumbnail_photo(message: Message) -> None:
+        if not message.from_user:
+            return
+        uid = int(message.from_user.id)
+        session = await manager.repositories.session.get(0, uid)
+        if not session or session.get("step") != "set_video_thumbnail":
+            return
+        if not is_admin(uid):
+            await manager.repositories.session.clear(0, uid)
+            await message.answer("⛔ No autorizado.")
+            return
+        try:
+            photo = message.photo[-1]
+            image_buffer = BytesIO()
+            await manager.master_bot.download(photo.file_id, destination=image_buffer)
+            saved_path = save_default_video_thumbnail(
+                image_buffer.getvalue(), manager.settings.video_thumbnail_path
+            )
+            await manager.repositories.session.clear(0, uid)
+            await message.answer(
+                "✅ <b>Miniatura actualizada</b>\n\n"
+                "Los próximos videos procesados por los bots hijos usarán esta imagen.\n"
+                f"📁 Ruta configurada: <code>{html.escape(str(saved_path))}</code>\n\n"
+                "Los videos ya subidos a Telegram no se modifican retroactivamente."
+            )
+        except Exception as exc:
+            await message.answer(
+                "❌ No pude guardar esa imagen. Probá enviarla como foto JPG/PNG.\n"
+                f"Detalle: <code>{html.escape(str(exc)[:250])}</code>"
+            )
 
     @router.callback_query(F.data == "master:list")
     async def admin_list(callback: CallbackQuery) -> None:
