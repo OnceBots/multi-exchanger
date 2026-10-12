@@ -10,7 +10,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramAPIError, TelegramUnauthorizedError, TelegramBadRequest
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, MenuButtonWebApp, WebAppInfo
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.bot.api_client import build_bot
 from app.bot.child_handlers import build_router as build_child_router
@@ -78,25 +78,12 @@ class BotManager:
         self.logger.info("master_ready username=@%s id=%s", me.username, me.id)
         from app.bot.master_handlers import build_master_router
         self.master_dp.include_router(build_master_router(self))
-        await self._configure_menu_button(
-            self.master_bot,
-            f"{self.settings.app_base_url}/master-app",
-            "🚀 Master App",
-            label="master",
-        )
         if self.settings.environment == "production":
             await self.configure_webhook(self.master_bot, self.settings.webhook_base_url + self.settings.master_webhook_path, self.settings.webhook_secret, "master", self.master_dp)
         elif self.settings.mode == "webhook":
             await self.configure_webhook(self.master_bot, self.settings.webhook_base_url + self.settings.master_webhook_path, self.settings.webhook_secret, "master", self.master_dp)
         else:
             self.system_tasks.create(self.master_dp.start_polling(self.master_bot, handle_signals=False), "master-polling")
-
-    async def _configure_menu_button(self, bot: Bot, url: str, text: str, label: str) -> None:
-        try:
-            await bot.set_chat_menu_button(menu_button=MenuButtonWebApp(text=text, web_app=WebAppInfo(url=url)))
-            self.logger.info("mini_app_menu_ready label=%s url=%s", label, url)
-        except Exception:
-            self.logger.exception("mini_app_menu_failed label=%s", label)
 
     async def configure_webhook(self, bot: Bot, url: str, secret: str, label: str, dispatcher: Dispatcher) -> None:
         allowed = dispatcher.resolve_used_update_types() or ["message", "callback_query"]
@@ -199,7 +186,7 @@ class BotManager:
             "<b>✅ TU BOT HIJO YA ESTÁ ACTIVO</b>\n\n"
             f"🤖 <b>@{info.username or info.bot_id}</b>\n"
             "🟢 Webhook y runtime activos.\n"
-            "📱 Abre el bot y pulsa <b>📱 Abrir Mini App</b> para administrar sus salas.\n\n"
+            "💬 Abre tu bot y usa los botones del chat para crear y administrar salas.\n\n"
             "⏱️ El bot queda en modo <b>Manual</b> hasta que configures un temporizador.\n"
             "🗑️ Para eliminarlo definitivamente de Telegram tendrás que hacerlo desde @BotFather."
         )
@@ -263,12 +250,6 @@ class BotManager:
                 else:
                     runtime.add_task(dispatcher.start_polling(bot, handle_signals=False), f"child-polling:{bot_id}")
 
-                await self._configure_menu_button(
-                    bot,
-                    f"{self.settings.app_base_url}/app?bot_id={bot_id}",
-                    "📱 Mini App",
-                    label=f"child:{bot_id}",
-                )
 
                 runtime.status = BotStatus.RUNNING
                 runtime.started_at = utcnow()
@@ -572,12 +553,6 @@ class BotManager:
                                     bot_id, wh.url, expected_url, wh.last_error_message,
                                 )
                                 await self.configure_webhook(runtime.bot, expected_url, secret, f"child:{bot_id}", runtime.dispatcher)
-                                await self._configure_menu_button(
-                                    runtime.bot,
-                                    f"{self.settings.app_base_url}/app?bot_id={bot_id}",
-                                    "📱 Mini App",
-                                    label=f"child:{bot_id}",
-                                )
                     except TelegramUnauthorizedError:
                         self.logger.warning("child_token_rejected_by_telegram bot_id=%s action=archive", bot_id)
                         try:

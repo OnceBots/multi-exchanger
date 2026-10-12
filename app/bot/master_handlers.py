@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-import time
 import html
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, WebAppInfo
-from urllib.parse import urlencode
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from app.services.webapp_auth import make_launch_token
 
 from app.services.token_service import InvalidBotTokenError
 from app.services.bot_lifecycle import botfather_instructions, schedule_label
@@ -31,24 +28,9 @@ def build_master_router(manager) -> Router:
     def is_admin(user_id: int) -> bool:
         return user_id in manager.settings.admin_ids
 
-    def master_app_url(user_id: int) -> str:
-        token = make_launch_token(
-            manager.settings.webhook_secret,
-            0,
-            user_id,
-            manager.settings.webapp_launch_ttl_seconds,
-        )
-        params = {
-            "user_id": str(user_id),
-            "id": str(user_id),
-            "v": str(int(time.time())),
-            "launch": token,
-        }
-        return f"{manager.settings.app_base_url}/master-app?{urlencode(params)}"
-
     def menu(user_id: int) -> InlineKeyboardMarkup:
         rows = [
-            [InlineKeyboardButton(text="➕ Crear mi bot", web_app=WebAppInfo(url=master_app_url(user_id)))],
+            [InlineKeyboardButton(text="➕ Crear mi bot", callback_data="master:create")],
             [InlineKeyboardButton(text="🤖 Mis bots", callback_data="master:mine"), InlineKeyboardButton(text="📖 Cómo funciona", callback_data="master:how")],
         ]
         if is_admin(user_id):
@@ -76,7 +58,7 @@ def build_master_router(manager) -> Router:
                 "🔐 Tokens cifrados\n"
                 "🌐 Webhooks individuales\n"
                 "🧩 Cada bot tiene runtime aislado\n\n"
-                "Usa el panel para administrar la plataforma."
+                "Usa los botones de este chat para administrar la plataforma."
             )
         else:
             text = (
@@ -85,7 +67,6 @@ def build_master_router(manager) -> Router:
                 "✨ Salas públicas/privadas\n"
                 "📸 Fotos · 🎬 Vídeos · 📎 Archivos · 🎞 GIF · 🖼 Álbumes\n"
                 "🕶️ Distribución anónima\n"
-                "📱 Mini App\n\n"
                 "🔐 Los tokens se validan y se almacenan cifrados."
             )
         await message.answer(text, reply_markup=menu(uid))
@@ -107,7 +88,7 @@ def build_master_router(manager) -> Router:
         uid = int(target.from_user.id)
         rows = []
         for doc in docs[:30]:
-            icons = {"RUNNING": "🟢", "STARTING": "🟡", "RESTARTING": "🟠", "ERROR": "🔴", "AUTH_ERROR": "🛑", "STOPPED": "⚫", "DISABLED": "🔵"}
+            icons = {"RUNNING": "🟢", "STARTING": "🟡", "RESTARTING": "🟠", "ERROR": "🔴", "STOPPED": "⚫", "DISABLED": "🔵"}
             label = f"{icons.get(doc.get('status'), '⚪')} @{doc.get('username') or doc.get('bot_id')}"
             rows.append([InlineKeyboardButton(text=label[:42], callback_data=f"master:botinfo:{doc['bot_id']}")])
         rows.append([InlineKeyboardButton(text="↩️ Inicio", callback_data="master:home")])
@@ -142,8 +123,6 @@ def build_master_router(manager) -> Router:
         if uid == info.owner_id or uid in manager.settings.admin_ids:
             rows.append([InlineKeyboardButton(text="⏱️ Temporizador", callback_data=f"master:timer:{bot_id}")])
             rows.append([InlineKeyboardButton(text="📖 Eliminar en BotFather", callback_data=f"master:deletehelp:{bot_id}")])
-            if status in {"AUTH_ERROR", "ERROR"}:
-                rows.append([InlineKeyboardButton(text="🔐 Actualizar token", callback_data=f"master:rotate-token:{bot_id}")])
         if uid in manager.settings.admin_ids:
             rows.extend([
                 [InlineKeyboardButton(text="▶️ Iniciar", callback_data=f"master:start:{bot_id}"), InlineKeyboardButton(text="⏹ Detener", callback_data=f"master:stop:{bot_id}")],
@@ -230,24 +209,6 @@ def build_master_router(manager) -> Router:
             await _safe_callback_answer(callback, str(exc)[:180], show_alert=True)
         await show_info(callback, bot_id)
 
-    @router.callback_query(F.data.startswith("master:rotate-token:"))
-    async def rotate_token_menu(callback: CallbackQuery) -> None:
-        bot_id = int(callback.data.split(":")[-1])
-        info = await manager.get_info(bot_id)
-        uid = int(callback.from_user.id)
-        if uid != info.owner_id and not is_admin(uid):
-            await _safe_callback_answer(callback, "No autorizado", show_alert=True)
-            return
-        await _safe_callback_answer(callback)
-        await manager.repositories.session.set(0, uid, f"replace_child_token:{bot_id}", {"bot_id": bot_id})
-        await callback.message.edit_text(
-            "<b>🔐 ACTUALIZAR TOKEN DEL BOT</b>\n\n"
-            f"🤖 <b>@{html.escape(info.username or str(bot_id))}</b>\n\n"
-            "Envía el nuevo token emitido por <b>@BotFather</b>.\n"
-            "Debe pertenecer exactamente al mismo bot.\n\n"
-            "🔒 El mensaje con el token se eliminará después de recibirlo."
-        )
-
     @router.callback_query(F.data.startswith("master:timer:"))
     async def timer_menu(callback: CallbackQuery) -> None:
         bot_id = int(callback.data.split(":")[-1])
@@ -327,40 +288,9 @@ def build_master_router(manager) -> Router:
         if not session:
             await message.answer("Usa /start para abrir el panel.", reply_markup=menu(uid))
             return
-        step = session.get("step") or ""
+        if session.get("step") != "create_child_token":
+            return
         token = message.text.strip()
-
-        if step.startswith("replace_child_token:"):
-            try:
-                bot_id = int(step.split(":", 1)[1])
-                try:
-                    await message.delete()
-                except Exception:
-                    pass
-                info = await manager.get_info(bot_id)
-                if uid != info.owner_id and not is_admin(uid):
-                    await manager.repositories.session.clear(0, uid)
-                    await message.answer("⛔ No autorizado.")
-                    return
-                await manager.replace_bot_token(bot_id, token, uid)
-                await manager.repositories.session.clear(0, uid)
-                await manager.repositories.audit.log(0, uid, "BOT_TOKEN_ROTATED", target=str(bot_id), details={"username": info.username})
-                await message.answer(
-                    "<b>✅ TOKEN ACTUALIZADO</b>\n\n"
-                    f"🤖 <b>@{html.escape((await manager.get_info(bot_id)).username or str(bot_id))}</b>\n"
-                    "🟢 Webhook configurado nuevamente.\n"
-                    "🚀 Runtime activo."
-                )
-            except InvalidBotTokenError as exc:
-                await manager.repositories.session.clear(0, uid)
-                await message.answer(f"❌ {html.escape(str(exc))}")
-            except Exception as exc:
-                await manager.repositories.session.clear(0, uid)
-                await message.answer(f"❌ No se pudo actualizar el token: {html.escape(str(exc)[:500])}")
-            return
-
-        if step != "create_child_token":
-            return
         try:
             # Delete the secret-bearing message as early as possible.
             try:

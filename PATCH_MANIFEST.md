@@ -22,7 +22,7 @@ Este archivo describe el overlay de cambios. Extrae el ZIP desde la raíz del re
 
 ## Configuración necesaria
 
-Copia las nuevas variables de `.env.example` a tu `.env` y configura `CANAL_STORAGE_ID` con el ID del canal privado. No reemplaces `WEBHOOK_BASE_URL`/`APP_BASE_URL` por localhost: esos son los endpoints públicos HTTPS.
+Copia las nuevas variables de `.env.example` a tu `.env` y configura `CANAL_STORAGE_ID` con el ID del canal privado. `WEBHOOK_BASE_URL` debe ser un endpoint público HTTPS que apunte a este backend para recibir webhooks de Telegram. La interfaz se maneja dentro del chat; ya no se necesita `APP_BASE_URL`.
 
 Cada bot hijo debe poder publicar en el canal buffer. Cambia `assets/thumb.jpg` por un JPEG válido, inferior a 200 KB y de máximo 320x320.
 

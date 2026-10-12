@@ -5,7 +5,7 @@
 - Conserva el mismo `MONGO_URI` y `DB_NAME` que utiliza la instancia anterior para continuar usando la misma base de datos.
 - `BOT_TOKEN_ENCRYPTION_KEY` debe ser **exactamente la misma** clave que se usaba en la instancia anterior. No la generes de nuevo: los tokens hijos guardados en Mongo están cifrados con ella.
 - No subas `.env` a GitHub. Manténlo solo en el VPS con permisos `600`.
-- `WEBHOOK_BASE_URL` y `APP_BASE_URL` tienen que apuntar al nuevo dominio público HTTPS. `TELEGRAM_API_BASE_URL` es el endpoint interno del Bot API local, no el URL público.
+- `WEBHOOK_BASE_URL` tiene que apuntar al endpoint público HTTPS de este backend para recibir los webhooks de Telegram. La plataforma se administra íntegramente por chat, por lo que no se necesita `APP_BASE_URL`. `TELEGRAM_API_BASE_URL` es el endpoint interno del Bot API local, no el URL público.
 - Si `MONGO_URI` corresponde a MongoDB Atlas, agrega la IP pública de Vultr a Network Access de Atlas (solo esa IP, no `0.0.0.0/0`) para que el VPS pueda conectarse.
 - El Bot API local acepta HTTP dentro de la red privada Docker. No expongas públicamente el puerto 8081 ni MongoDB 27017.
 
@@ -56,7 +56,7 @@ cd /opt/multi-exchanger
 
 Si ya existe `/opt/multi-exchanger`, no vuelvas a clonarlo; haz backup de `.env` y ejecuta `git fetch origin` y `git pull --ff-only origin main` después de fusionar la rama en GitHub.
 
-## 3. HTTPS para webhooks y Mini App
+## 3. HTTPS para los webhooks de Telegram
 
 Crea un registro DNS `A` (por ejemplo `bot.tudominio.com`) que apunte a la IP pública de Vultr. Instala Caddy desde su repositorio oficial: https://caddyserver.com/docs/install.
 
@@ -129,7 +129,6 @@ MASTER_BOT_TOKEN=TOKEN_ACTUAL_DEL_MASTER
 MONGO_URI=URI_ACTUAL_DE_MONGODB
 DB_NAME=telegram_multibot
 WEBHOOK_BASE_URL=https://bot.tudominio.com
-APP_BASE_URL=https://bot.tudominio.com
 WEBHOOK_SECRET=SECRETO_LARGO_SOLO_LETRAS_NUMEROS_GUION_BAJO
 BOT_TOKEN_ENCRYPTION_KEY=LA_MISMA_CLAVE_FERNET_QUE_USABA_RENDER
 ADMIN_IDS=ID_TELEGRAM_ADMIN

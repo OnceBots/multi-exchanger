@@ -2,11 +2,9 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
-from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.staticfiles import StaticFiles
 
 from app.bot.manager import BotManager
 from app.config import Settings
@@ -15,7 +13,6 @@ from app.db.client import MongoManager
 from app.db.indexes import ensure_indexes
 from app.logging_config import configure_logging
 from app.web.routes import build_router
-from app.web.webapp import build_webapp_router
 from app.web.webhook import build_webhook_router
 
 
@@ -61,11 +58,8 @@ def create_app() -> FastAPI:
     app = FastAPI(title="Telegram Multi-Bot Platform", version="1.0.0", lifespan=lifespan)
     app.add_middleware(GZipMiddleware, minimum_size=1024)
     app.state.platform = platform
-    static_dir = Path(__file__).resolve().parent / "web" / "static"
-    app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
     app.include_router(build_router(platform))
     app.include_router(build_webhook_router(platform))
-    app.include_router(build_webapp_router(platform))
     return app
 
 
