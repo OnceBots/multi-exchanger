@@ -162,7 +162,7 @@ class VideoThumbnailPipeline:
 
     async def _resolve_local_video(self, server_file_path: str, file_size_hint: int = 0) -> tuple[Path, int]:
         """Resolve the Bot API absolute file path and inspect size before copying to tmpfs."""
-        source_path = map_api_file_path(self.ctx.settings, server_file_path)
+        source_path = map_api_file_path(self.ctx.settings, server_file_path, bot_token=self.ctx.bot.token)
         if not await asyncio.to_thread(source_path.is_file):
             raise RuntimeError(f"El archivo devuelto por el Bot API no está visible para la aplicación: {source_path}")
         actual_size = int(await asyncio.to_thread(lambda: source_path.stat().st_size))

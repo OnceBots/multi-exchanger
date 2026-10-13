@@ -6,6 +6,7 @@ from io import BytesIO
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
+from app.bot.api_client import map_api_file_path
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 
@@ -218,63 +219,46 @@ def build_master_router(manager) -> Router:
             return
         try:
             photo = message.photo[-1]
-            image_buffer = BytesIO()
-            file_info = await manager.master_bot.get_file(photo.file_id)
-            file_path = file_info.file_path
-            if not file_path:
-                raise ValueError("Telegram no devolvió la ruta de la imagen.")
+            max_image_bytes = 10 * 1024 * 1024
 
             if manager.settings.telegram_api_local_mode:
-                # In local Bot API mode getFile may return a relative path such as
-                # "photos/file_1.jpg". Resolve it against the configured Bot API
-                # data root, then map the same relative location to the host-visible
-                # root. Do not build an HTTP /file URL: this deployment's local file
-                # paths are already available through the shared data directory.
-                from pathlib import Path
+                # In local Bot API mode use the shared filesystem; never build an
+                # /file/bot... URL, because getFile may return a local disk path.
+                file_info = await manager.master_bot.get_file(photo.file_id)
+                if not file_info.file_path:
+                    raise ValueError("Telegram no devolvió una ruta de archivo válida.")
+                local_path = map_api_file_path(
+                    manager.settings,
+                    file_info.file_path,
+                    bot_token=manager.master_bot.token,
+                )
+                file_size = await asyncio.to_thread(lambda: local_path.stat().st_size)
+                if file_size <= 0 or file_size > max_image_bytes:
+                    raise ValueError("La imagen está vacía o supera el límite de 10 MB.")
 
-                server_root = Path(
-                    manager.settings.telegram_api_server_files_root
-                ).expanduser().resolve()
-                host_root = Path(
-                    manager.settings.telegram_api_host_files_root
-                ).expanduser().resolve()
-                returned_path = Path(file_path)
-                server_path = (
-                    returned_path if returned_path.is_absolute()
-                    else server_root / returned_path
-                ).resolve()
-                try:
-                    relative_path = server_path.relative_to(server_root)
-                except ValueError as exc:
-                    raise ValueError(
-                        "La ruta devuelta por el Bot API queda fuera de su directorio de datos."
-                    ) from exc
+                def read_image_limited() -> bytes:
+                    with local_path.open("rb") as stream:
+                        return stream.read(max_image_bytes + 1)
 
-                local_path = (host_root / relative_path).resolve()
-                try:
-                    local_path.relative_to(host_root)
-                except ValueError as exc:
-                    raise ValueError(
-                        "La ruta de la imagen queda fuera del directorio local permitido."
-                    ) from exc
-
-                if not local_path.is_file():
-                    raise FileNotFoundError(
-                        "No encuentro la foto en el volumen compartido del Bot API: "
-                        f"{relative_path.as_posix()}. Verificá TELEGRAM_API_SERVER_FILES_ROOT "
-                        "y TELEGRAM_API_HOST_FILES_ROOT."
-                    )
-                if local_path.stat().st_size > 10 * 1024 * 1024:
-                    raise ValueError("La imagen supera el límite de 10 MB.")
-                data = await asyncio.to_thread(local_path.read_bytes)
-                if len(data) > 10 * 1024 * 1024:
-                    raise ValueError("La imagen supera el límite de 10 MB.")
-                image_buffer.write(data)
+                image_bytes = await asyncio.to_thread(read_image_limited)
+                if not image_bytes or len(image_bytes) > max_image_bytes:
+                    raise ValueError("La imagen está vacía o supera el límite de 10 MB.")
+                if len(image_bytes) != file_size:
+                    raise OSError("La lectura de la imagen quedó incompleta.")
             else:
-                await manager.master_bot.download(photo.file_id, destination=image_buffer)
+                image_buffer = BytesIO()
+                await manager.master_bot.download(
+                    photo.file_id,
+                    destination=image_buffer,
+                )
+                image_bytes = image_buffer.getvalue()
+                if not image_bytes or len(image_bytes) > max_image_bytes:
+                    raise ValueError("La imagen está vacía o supera el límite de 10 MB.")
 
-            saved_path = save_default_video_thumbnail(
-                image_buffer.getvalue(), manager.settings.video_thumbnail_path
+            saved_path = await asyncio.to_thread(
+                save_default_video_thumbnail,
+                image_bytes,
+                manager.settings.video_thumbnail_path,
             )
             await manager.repositories.session.clear(0, uid)
             await message.answer(
@@ -284,9 +268,15 @@ def build_master_router(manager) -> Router:
                 "Los videos ya subidos a Telegram no se modifican retroactivamente."
             )
         except Exception as exc:
+            # Do not expose bot tokens or absolute filesystem paths in Telegram.
+            detail = str(exc).replace(manager.master_bot.token, "<token>")
+            detail = detail.replace(
+                str(manager.settings.telegram_api_host_files_root),
+                "<volumen-local>",
+            )
             await message.answer(
                 "❌ No pude guardar esa imagen. Probá enviarla como foto JPG/PNG.\n"
-                f"Detalle: <code>{html.escape(str(exc)[:250])}</code>"
+                f"Detalle: <code>{html.escape(detail[:250])}</code>"
             )
 
     @router.callback_query(F.data == "master:global-config")

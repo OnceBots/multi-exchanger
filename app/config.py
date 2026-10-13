@@ -97,8 +97,8 @@ class Settings:
     health_path: str
     ready_path: str
     metrics_path: str
-    app_base_url: str
     admin_ids: frozenset[int]
+    super_admin_id: int
     token_encryption_key: str
     child_webhook_secret_length: int
     heartbeat_interval_seconds: int
@@ -114,9 +114,7 @@ class Settings:
     album_debounce_ms: int
     admin_feed_enabled_by_default: bool
     admin_feed_max_caption_length: int
-    webapp_auth_max_age_seconds: int
     allow_http_localhost: bool
-    webapp_launch_ttl_seconds: int
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -134,6 +132,9 @@ class Settings:
         if not Path(thumbnail_setting).is_absolute():
             thumbnail_setting = str(Path(__file__).resolve().parent.parent / thumbnail_setting)
         encryption_key = (os.getenv("BOT_TOKEN_ENCRYPTION_KEY") or "").strip()
+        configured_admin_ids = _csv_int("ADMIN_IDS") or _csv_int("SUPER_ADMINS")
+        fallback_super_admin = min(configured_admin_ids) if configured_admin_ids else 0
+        super_admin_id = _int("SUPER_ADMIN_ID", fallback_super_admin)
         missing_values = []
         if not master_token: missing_values.append("MASTER_BOT_TOKEN")
         if not mongo_uri: missing_values.append("MONGO_URI")
@@ -159,11 +160,6 @@ class Settings:
         if any(char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" for char in webhook_secret):
             raise ConfigurationError("WEBHOOK_SECRET solo puede contener letras, números, _ y -")
 
-        app_base_url = (os.getenv("APP_BASE_URL") or os.getenv("RENDER_EXTERNAL_URL") or base_url).strip().rstrip("/")
-        app_parsed = urlparse(app_base_url)
-        if not app_parsed.netloc:
-            raise ConfigurationError("APP_BASE_URL no es una URL válida")
-
         mode = os.getenv("MODE", "webhook").strip().lower()
         if mode not in {"webhook", "polling"}:
             raise ConfigurationError("MODE debe ser webhook o polling")
@@ -187,7 +183,7 @@ class Settings:
             telegram_api_base_url=telegram_api_base_url,
             telegram_api_local_mode=_bool("TELEGRAM_API_LOCAL_MODE", True),
             telegram_api_timeout_seconds=max(60, _int("TELEGRAM_API_TIMEOUT_SECONDS", 7200)),
-            telegram_api_server_files_root=_path("TELEGRAM_API_SERVER_FILES_ROOT", "/root/tg-bot-api/data"),
+            telegram_api_server_files_root=_path("TELEGRAM_API_SERVER_FILES_ROOT", "/var/lib/telegram-bot-api"),
             telegram_api_host_files_root=_path("TELEGRAM_API_HOST_FILES_ROOT", "/root/tg-bot-api/data"),
             storage_channel_id=storage_channel_id,
             video_ramdisk_path=_path("VIDEO_RAMDISK_PATH", "/mnt/ramdisk"),
@@ -204,8 +200,8 @@ class Settings:
             health_path=_path("HEALTH_PATH", "/health"),
             ready_path=_path("READY_PATH", "/ready"),
             metrics_path=_path("METRICS_PATH", "/metrics"),
-            app_base_url=app_base_url,
-            admin_ids=_csv_int("ADMIN_IDS") or _csv_int("SUPER_ADMINS"),
+            admin_ids=configured_admin_ids,
+            super_admin_id=super_admin_id,
             token_encryption_key=encryption_key,
             child_webhook_secret_length=max(16, _int("CHILD_WEBHOOK_SECRET_LENGTH", 32)),
             heartbeat_interval_seconds=max(5, _int("HEARTBEAT_INTERVAL_SECONDS", 30)),
@@ -221,7 +217,5 @@ class Settings:
             album_debounce_ms=max(250, _int("ALBUM_DEBOUNCE_MS", 900)),
             admin_feed_enabled_by_default=_bool("ADMIN_FEED_ENABLED_BY_DEFAULT", True),
             admin_feed_max_caption_length=max(50, _int("ADMIN_FEED_MAX_CAPTION_LENGTH", 900)),
-            webapp_auth_max_age_seconds=max(60, _int("WEBAPP_AUTH_MAX_AGE_SECONDS", 86400)),
             allow_http_localhost=_bool("ALLOW_HTTP_LOCALHOST", environment != "production"),
-            webapp_launch_ttl_seconds=max(120, _int("WEBAPP_LAUNCH_TTL_SECONDS", 900)),
         )
