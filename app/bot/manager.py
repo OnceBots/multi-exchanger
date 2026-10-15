@@ -437,9 +437,10 @@ class BotManager:
             finally:
                 runtime.admin_feed_queue.task_done()
 
-    async def notify_admins_new_bot(self, info: BotInfo, creator_id: int) -> None:
+    async def notify_admins_new_bot(self, info: BotInfo, creator_id: int, reactivated: bool = False) -> None:
+        heading = "♻️ BOT ARCHIVADO RECUPERADO" if reactivated else "🚀 NUEVO BOT REGISTRADO"
         text = (
-            "<b>🚀 NUEVO BOT REGISTRADO</b>\n\n"
+            f"<b>{heading}</b>\n\n"
             f"🤖 @{info.username or info.bot_id}\n"
             f"🆔 <code>{info.bot_id}</code>\n"
             f"👤 Creador: <code>{creator_id}</code>\n"

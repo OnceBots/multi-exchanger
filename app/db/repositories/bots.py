@@ -85,5 +85,41 @@ class BotRepository:
             }},
         )
 
+
+    async def reactivate_archived(self, bot_id: int, updates: dict) -> bool:
+        """Atomically reactivate an archived bot without replacing its config/data.
+
+        ``updates`` should contain only refreshed identity/secrets/runtime fields.
+        Existing owner, created_at, config preferences and related collections are
+        intentionally preserved.
+        """
+        lifecycle_fields = {
+            "config.lifecycle.mode": "",
+            "config.lifecycle.reason": "",
+            "config.lifecycle.archived_at": "",
+            "config.lifecycle.delete_at": "",
+            "config.lifecycle.scheduled_at": "",
+            "config.lifecycle.scheduled_by": "",
+            "config.lifecycle.label": "",
+            "archived_at": "",
+        }
+        now = utcnow()
+        changes = dict(updates)
+        changes["bot_id"] = int(bot_id)
+        changes["enabled"] = True
+        changes["status"] = "STARTING"
+        changes.setdefault("updated_at", now)
+        result = await self.col.update_one(
+            {
+                "bot_id": int(bot_id),
+                "$or": [
+                    {"status": "ARCHIVED"},
+                    {"config.lifecycle.mode": "ARCHIVED"},
+                ],
+            },
+            {"$set": changes, "$unset": lifecycle_fields},
+        )
+        return bool(result.matched_count == 1)
+
     async def delete(self, bot_id: int) -> None:
         await self.col.delete_one({"bot_id": int(bot_id)})

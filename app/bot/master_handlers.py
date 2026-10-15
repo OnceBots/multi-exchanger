@@ -55,6 +55,8 @@ def build_master_router(manager) -> Router:
             "2️⃣ Envía aquí el token.\n"
             "3️⃣ Lo validaremos con Telegram.\n"
             "4️⃣ El bot se registrará, cifrará y activará con webhook.\n\n"
+            "♻️ Si el bot ya está archivado, puedes enviar el mismo token para recuperarlo. "
+            "Conservaremos su propietario, configuración y salas anteriores.\n\n"
             "🔐 El token no se mostrará en los logs. El mensaje se elimina después de recibirlo."
         )
 
@@ -467,16 +469,30 @@ def build_master_router(manager) -> Router:
                 pass
             info = await manager.register_bot(token, uid, metadata={"created_from": "master_chat"})
             await manager.repositories.session.clear(0, uid)
-            await manager.repositories.audit.log(0, uid, "BOT_CREATED", target=str(info.bot_id), details={"username": info.username})
-            await message.answer(
-                "<b>🎉 BOT CREADO Y ACTIVO</b>\n\n"
-                f"🤖 <b>@{html.escape(info.username or str(info.bot_id))}</b>\n"
-                f"🆔 <code>{info.bot_id}</code>\n"
-                "🟢 Webhook configurado\n"
-                "🧩 Runtime independiente\n\n"
-                "Tu bot ya está listo.",
-                reply_markup=menu(uid),
+            was_reactivated = bool(info.config.get("_reactivated_in_this_request"))
+            await manager.repositories.audit.log(
+                0, uid, "BOT_REACTIVATED" if was_reactivated else "BOT_CREATED",
+                target=str(info.bot_id), details={"username": info.username},
             )
+            if was_reactivated:
+                response = (
+                    "<b>♻️ BOT RECUPERADO Y ACTIVO</b>\n\n"
+                    f"🤖 <b>@{html.escape(info.username or str(info.bot_id))}</b>\n"
+                    f"🆔 <code>{info.bot_id}</code>\n"
+                    "🟢 Webhook configurado\n"
+                    "🧩 Runtime independiente\n\n"
+                    "Se conservaron el propietario, la configuración y los datos asociados del bot archivado."
+                )
+            else:
+                response = (
+                    "<b>🎉 BOT CREADO Y ACTIVO</b>\n\n"
+                    f"🤖 <b>@{html.escape(info.username or str(info.bot_id))}</b>\n"
+                    f"🆔 <code>{info.bot_id}</code>\n"
+                    "🟢 Webhook configurado\n"
+                    "🧩 Runtime independiente\n\n"
+                    "Tu bot ya está listo."
+                )
+            await message.answer(response, reply_markup=menu(uid))
         except InvalidBotTokenError as exc:
             await manager.repositories.session.clear(0, uid)
             await message.answer(f"❌ {html.escape(str(exc))}")

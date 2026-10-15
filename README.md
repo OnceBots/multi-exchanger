@@ -34,13 +34,13 @@ Cada child tiene su propio `Bot`, `Dispatcher`, colas, workers, heartbeat y secr
 1. Usuario entra al Master.
 2. Pulsa **Crear mi bot** o usa `/add_bot`.
 3. Se valida el token con `getMe`.
-4. Se comprueba que el `bot_id` no exista.
-5. Token y secreto de webhook se cifran con Fernet.
-6. Se persiste el tenant.
-7. Se crea el runtime.
-8. Se configura el webhook `https://host/telegram/webhook/{bot_id}`.
-9. Se inicia el worker pool y heartbeat.
-10. Los administradores reciben una notificación del nuevo bot.
+4. Si el `bot_id` no existe, se registra como bot nuevo; si existe y está activo, se rechaza el duplicado.
+5. Si el registro está archivado, el propietario original (o un administrador) puede recuperarlo con el mismo token validado.
+6. La recuperación renueva el token cifrado y el secreto de webhook, conserva el propietario, la configuración no relacionada con el ciclo de vida y todos los documentos de salas/miembros/historial.
+7. Token y secreto de webhook se cifran con Fernet.
+8. Se crea/reinicia el runtime sin duplicar el bot.
+9. Se configura el webhook `https://host/telegram/webhook/{bot_id}`.
+10. Se inicia el worker pool y heartbeat; los administradores reciben notificación de alta o recuperación.
 
 ## Webhooks
 
@@ -63,7 +63,8 @@ TypeError: can't subtract offset-naive and offset-aware datetimes
 - documento
 - GIF/animation
 - álbumes de fotos/vídeos con debounce
-- captions
+- los mensajes distribuidos en salas son solo multimedia, sin captions ni texto adjunto
+- los videos y álbumes con video deben pasar correctamente por la miniatura predeterminada y el canal buffer; si el pipeline falla, se bloquea la entrega en lugar de enviar el video directamente
 - distribución anónima
 - exclusión del emisor
 - cola acotada

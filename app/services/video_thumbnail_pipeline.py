@@ -214,8 +214,7 @@ class VideoThumbnailPipeline:
                         chat_id=_chat_id(settings.storage_channel_id),
                         video=FSInputFile(video_path, filename=filename),
                         thumbnail=FSInputFile(staged_thumbnail, filename="thumb.jpg"),
-                        caption=job.get("caption"),
-                        parse_mode="HTML",
+                        caption=None,
                         supports_streaming=True,
                     ),
                     request_timeout=int(settings.telegram_api_timeout_seconds),
@@ -272,15 +271,10 @@ class VideoThumbnailPipeline:
 
                 upload_media = []
                 uploaded_video_ids: list[str] = []
-                caption = group.get("caption")
-                for index, item in enumerate(items):
+                for item in items:
                     message_id = int(item.get("message_id", 0))
-                    caption_for_item = caption if index == 0 else None
-                    parse_mode = "HTML" if caption_for_item else None
                     if item.get("type") == "photo":
-                        upload_media.append(InputMediaPhoto(
-                            media=item["file_id"], caption=caption_for_item, parse_mode=parse_mode,
-                        ))
+                        upload_media.append(InputMediaPhoto(media=item["file_id"], caption=None))
                         continue
                     if item.get("type") != "video":
                         continue
@@ -293,8 +287,7 @@ class VideoThumbnailPipeline:
                     upload_media.append(InputMediaVideo(
                         media=FSInputFile(video_path, filename=filename),
                         thumbnail=FSInputFile(staged_thumbnail, filename="thumb.jpg"),
-                        caption=caption_for_item,
-                        parse_mode=parse_mode,
+                        caption=None,
                         supports_streaming=True,
                     ))
 

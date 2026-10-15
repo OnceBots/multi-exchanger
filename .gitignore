@@ -10,3 +10,11 @@ htmlcov/
 .idea/
 .vscode/
 .DS_Store
+
+.env.*
+!.env.example
+venv/
+*.bak*
+backups/
+*.archive.gz
+*.sha256

@@ -17,6 +17,14 @@ class MediaService:
         if message.video:
             return "video", message.video.file_id
         if message.document:
+            # Telegram users can upload an MP4 as a document to bypass native
+            # video behavior. Classify video MIME/extensions as video too so the
+            # mandatory thumbnail pipeline still applies before room delivery.
+            mime_type = str(getattr(message.document, "mime_type", "") or "").lower()
+            file_name = str(getattr(message.document, "file_name", "") or "").lower()
+            video_extensions = (".mp4", ".m4v", ".mov", ".mkv", ".webm", ".avi", ".mpeg", ".mpg", ".3gp")
+            if mime_type.startswith("video/") or file_name.endswith(video_extensions):
+                return "video", message.document.file_id
             return "document", message.document.file_id
         if message.animation:
             return "animation", message.animation.file_id
@@ -53,12 +61,16 @@ class MediaService:
             return False
 
         if message.media_group_id and media_type in {"photo", "video"}:
+            media_object = (
+                message.photo[-1] if media_type == "photo"
+                else (message.video or message.document)
+            )
             item = {
                 "message_id": int(message.message_id),
                 "file_id": file_id,
                 "type": media_type,
-                "file_size": int(getattr(message.video if media_type == "video" else message.photo[-1], "file_size", 0) or 0),
-                "file_name": getattr(message.video, "file_name", None) if media_type == "video" else None,
+                "file_size": int(getattr(media_object, "file_size", 0) or 0),
+                "file_name": getattr(media_object, "file_name", None) if media_type == "video" else None,
             }
             await self.ctx.repositories.media.append_group(self.ctx.bot_id, room_id, str(message.media_group_id), item, user_id, message.caption)
             key = (room_id, user_id, str(message.media_group_id))
@@ -80,8 +92,8 @@ class MediaService:
             "media_type": media_type,
             "file_id": file_id,
             "caption": message.caption,
-            "file_size": int(getattr(message.video, "file_size", 0) or 0) if media_type == "video" else 0,
-            "file_name": getattr(message.video, "file_name", None) if media_type == "video" else None,
+            "file_size": int(getattr(message.video or message.document, "file_size", 0) or 0) if media_type == "video" else 0,
+            "file_name": getattr(message.video or message.document, "file_name", None) if media_type == "video" else None,
         })
         await self.ctx.admin_feed_queue.put({"sender_id": user_id, "media_type": media_type, "file_id": file_id, "caption": message.caption})
         return True
