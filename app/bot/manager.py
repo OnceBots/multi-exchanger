@@ -60,6 +60,9 @@ class BotManager:
         self.ready = False
         self._webhook_repair_last: dict[str, float] = {}
         self._webhook_repair_history: dict[str, deque[float]] = defaultdict(deque)
+        self.last_master_webhook_received_at = None
+        self._last_master_webhook_received_monotonic: float | None = None
+        self._master_webhook_pending_since: float | None = None
         self.master_bot = build_bot(settings.master_bot_token, settings, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
         self.master_dp = Dispatcher()
 
@@ -331,6 +334,9 @@ class BotManager:
         if not self.ready:
             raise RuntimeError("Master todavía no está listo")
         update_id = payload.get("update_id")
+        self.last_master_webhook_received_at = utcnow()
+        self._last_master_webhook_received_monotonic = time.monotonic()
+        self._master_webhook_pending_since = None
         self.logger.info("master_webhook_dispatch update_id=%s", update_id)
         result = await self.master_dp.feed_raw_update(self.master_bot, payload)
         self.logger.info("master_dispatch_result update_id=%s result_type=%s", update_id, type(result).__name__)
@@ -472,6 +478,50 @@ class BotManager:
             except Exception:
                 runtime.logger.exception("heartbeat_failed")
 
+    async def reconcile_master_webhook(self) -> bool:
+        """Ensure the Master webhook is correct and repair a demonstrably stalled queue.
+
+        Returns True only when a repair was attempted and completed. The stall
+        heuristic is deliberately conservative: a non-empty Telegram queue must
+        remain pending without a received webhook for several supervisor cycles.
+        """
+        if not (self.settings.environment == "production" or self.settings.mode == "webhook"):
+            return False
+
+        expected_url = self.settings.webhook_base_url + self.settings.master_webhook_path
+        info = await self.master_bot.get_webhook_info()
+        pending_count = int(getattr(info, "pending_update_count", 0) or 0)
+        now = time.monotonic()
+        stale_after = max(60, int(self.settings.supervisor_interval_seconds * 4))
+
+        pending_delivery_stall = False
+        if pending_count > 0:
+            if self._master_webhook_pending_since is None:
+                self._master_webhook_pending_since = now
+            last_received = self._last_master_webhook_received_monotonic
+            reference = last_received if last_received is not None else self._master_webhook_pending_since
+            pending_delivery_stall = (now - reference) >= stale_after
+        else:
+            self._master_webhook_pending_since = None
+
+        url_mismatch = getattr(info, "url", "") != expected_url
+        if not url_mismatch and not pending_delivery_stall:
+            return False
+        if not await self._webhook_repair_allowed("master"):
+            return False
+
+        self.logger.warning(
+            "master_webhook_repair url=%s expected=%s pending=%s pending_delivery_stall=%s last_error=%s last_received_at=%s",
+            getattr(info, "url", ""), expected_url, pending_count, pending_delivery_stall,
+            getattr(info, "last_error_message", None), self.last_master_webhook_received_at,
+        )
+        await self.configure_webhook(
+            self.master_bot, expected_url, self.settings.webhook_secret, "master", self.master_dp
+        )
+        # Avoid immediately interpreting the same pending backlog as a fresh stall.
+        self._master_webhook_pending_since = time.monotonic() if pending_count > 0 else None
+        return True
+
     async def _webhook_repair_allowed(self, key: str) -> bool:
         """Rate-limit repairs and flag external processes competing for a token."""
         now = time.monotonic()
@@ -501,21 +551,7 @@ class BotManager:
                 # Master health: Telegram session + effective webhook.
                 try:
                     await self.master_bot.get_me()
-                    if self.settings.environment == "production" or self.settings.mode == "webhook":
-                        expected_master_url = self.settings.webhook_base_url + self.settings.master_webhook_path
-                        info = await self.master_bot.get_webhook_info()
-                        if info.url != expected_master_url and await self._webhook_repair_allowed("master"):
-                            self.logger.warning(
-                                "master_webhook_repair url=%s expected=%s last_error=%s",
-                                info.url, expected_master_url, info.last_error_message,
-                            )
-                            await self.configure_webhook(
-                                self.master_bot,
-                                expected_master_url,
-                                self.settings.webhook_secret,
-                                "master",
-                                self.master_dp,
-                            )
+                    await self.reconcile_master_webhook()
                 except TelegramUnauthorizedError:
                     self.logger.critical("master_token_rejected_by_telegram")
                 except Exception:

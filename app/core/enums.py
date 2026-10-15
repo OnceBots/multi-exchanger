@@ -4,6 +4,7 @@ from enum import StrEnum
 
 
 class BotStatus(StrEnum):
+    CREATED = "CREATED"
     STARTING = "STARTING"
     RUNNING = "RUNNING"
     STOPPING = "STOPPING"

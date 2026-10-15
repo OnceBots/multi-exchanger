@@ -63,3 +63,11 @@ This patch is based on the supplied `multi-exchanger-main` source tree.
 4. Verify Master `/start`, then recover the archived child's token from the Master. Confirm that its old rooms/configuration return and its webhook reaches the child runtime.
 5. Test a video with a caption and an album with at least one video. Room recipients should receive no caption, and the video must appear with the default thumbnail.
 6. Temporarily make the storage/thumbnail pipeline unavailable in a test environment and verify the video is rejected rather than sent directly.
+
+
+## Compatibility/test-suite follow-up
+
+- `BotRuntime` now defaults to `BotStatus.CREATED` and transitions to `STOPPED` after teardown.
+- The context username test now follows the supported `BotRuntime.build_context()` path rather than an obsolete constructor signature.
+- The Master webhook logs its update kind and the manager tracks the last received Master webhook.
+- The supervisor now reconciles the Master webhook when its URL is incorrect or Telegram reports a queue that remains pending beyond a conservative timeout (`pending_delivery_stall`).

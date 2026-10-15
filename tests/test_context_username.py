@@ -1,11 +1,12 @@
 from types import SimpleNamespace
-from app.core.context import BotContext
+
+from app.bot.runtime import BotRuntime
 
 
 def test_bot_context_username_comes_from_runtime_info():
-    ctx = BotContext(
-        bot_id=123, bot=object(), dispatcher=object(), db=None, settings=None,
-        runtime=SimpleNamespace(info=SimpleNamespace(username="example_bot")),
-        logger=None, services=None, repositories=None, config=None,
-    )
+    info = SimpleNamespace(bot_id=123, username="example_bot", owner_id=456)
+    runtime = BotRuntime(info=info, bot=object(), dispatcher=object())
+
+    ctx = runtime.build_context(db=None, settings=None, repositories=None, services=None)
+
     assert ctx.bot_username == "example_bot"

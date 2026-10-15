@@ -16,7 +16,7 @@ class BotRuntime:
     info: BotInfo
     bot: Any
     dispatcher: Any
-    status: BotStatus
+    status: BotStatus = BotStatus.CREATED
     ctx: BotContext | None = None
     task_registry: TaskRegistry | None = None
     broadcast_queue: asyncio.Queue | None = None
@@ -64,3 +64,5 @@ class BotRuntime:
             await self.bot.session.close()
         except Exception:
             self.logger.exception("bot_session_close_failed")
+        finally:
+            self.status = BotStatus.STOPPED

@@ -31,7 +31,11 @@ def build_webhook_router(platform) -> APIRouter:
             raise HTTPException(status_code=403, detail="forbidden")
         data = await payload(request)
         update_id = data.get("update_id")
-        logger.info("master_webhook_received update_id=%s keys=%s", update_id, sorted(data.keys()))
+        update_kind = next(
+            (kind for kind in ("message", "callback_query", "my_chat_member", "chat_member", "inline_query", "chosen_inline_result") if kind in data),
+            "unknown",
+        )
+        logger.info("master_webhook_received update_id=%s kind=%s keys=%s", update_id, update_kind, sorted(data.keys()))
         if not platform.ready or not platform.manager:
             logger.warning("master_webhook_not_ready update_id=%s", update_id)
             raise HTTPException(status_code=503, detail="platform_not_ready")
