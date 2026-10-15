@@ -42,7 +42,7 @@ class MediaService:
         if not room_id:
             media_type, file_id = self.media_from_message(message)
             if media_type and self.ctx.admin_feed_queue is not None and message.chat.type == "private":
-                await self.ctx.admin_feed_queue.put({"sender_id": user_id, "media_type": media_type, "file_id": file_id, "caption": message.caption, "direct": True})
+                await self.ctx.admin_feed_queue.put({"sender_id": user_id, "media_type": media_type, "file_id": file_id, "caption": None, "direct": True})
                 await message.answer("ℹ️ Este bot puede procesar mensajes directos para funciones de seguridad y moderación. Para compartir con una comunidad, crea o únete a una sala.")
             else:
                 await message.answer("🏠 Primero crea o únete a una sala para publicar multimedia.")
@@ -84,18 +84,37 @@ class MediaService:
             self.album_tasks[key] = task
             return True
 
-        await self.ctx.broadcast_queue.put({
+        queued_job = {
             "room_id": room_id,
             "chat_id": int(message.chat.id),
             "sender_id": user_id,
             "message_id": int(message.message_id),
             "media_type": media_type,
             "file_id": file_id,
+            # Keep captions only for internal audit/event metadata. Delivery
+            # services must always strip them from room and admin publications.
             "caption": message.caption,
             "file_size": int(getattr(message.video or message.document, "file_size", 0) or 0) if media_type == "video" else 0,
             "file_name": getattr(message.video or message.document, "file_name", None) if media_type == "video" else None,
-        })
-        await self.ctx.admin_feed_queue.put({"sender_id": user_id, "media_type": media_type, "file_id": file_id, "caption": message.caption})
+        }
+        self.logger.info(
+            "room_media_queued bot_id=%s room_id=%s message_id=%s media_type=%s file_size=%s queue_size=%s",
+            self.ctx.bot_id,
+            room_id,
+            int(message.message_id),
+            media_type,
+            queued_job["file_size"],
+            self.ctx.broadcast_queue.qsize(),
+        )
+        await self.ctx.broadcast_queue.put(queued_job)
+        if self.ctx.admin_feed_queue is not None:
+            await self.ctx.admin_feed_queue.put({
+                "sender_id": user_id,
+                "media_type": media_type,
+                "file_id": file_id,
+                # Admin moderation feed is multimedia-only: no caption is needed.
+                "caption": None,
+            })
         return True
 
     async def _finalize_album(self, key) -> None:
@@ -108,7 +127,7 @@ class MediaService:
             await self.ctx.album_queue.put({"room_id": room_id, "group": group})
             if group.get("items"):
                 first = sorted(group["items"], key=lambda x: int(x.get("message_id", 0)))[0]
-                await self.ctx.admin_feed_queue.put({"sender_id": sender_id, "media_type": "album", "file_id": first.get("file_id"), "caption": group.get("caption"), "group": group})
+                await self.ctx.admin_feed_queue.put({"sender_id": sender_id, "media_type": "album", "file_id": first.get("file_id"), "caption": None, "group": group})
         except asyncio.CancelledError:
             raise
         except Exception:

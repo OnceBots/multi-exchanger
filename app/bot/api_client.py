@@ -8,14 +8,21 @@ from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.telegram import SimpleFilesPathWrapper, TelegramAPIServer
 
 
-def _safe_token_dir(token: str | None) -> str | None:
-    """Validate a bot token for use as a filesystem directory component."""
+def _bot_directory_from_token(token: str | None) -> str | None:
+    """Return Telegram's numeric bot-ID data directory, never the secret token.
+
+    The official local Bot API stores files under a directory named for the bot
+    user ID (the numeric prefix before ``:``), not under the complete token.
+    """
     if token is None:
         return None
     value = token.strip()
-    if not value or value in {".", ".."} or "/" in value or "\\" in value or "\x00" in value:
+    if not value or "\x00" in value or "/" in value or "\\" in value:
         raise ValueError("Token inválido para resolver un archivo local del Bot API.")
-    return value
+    bot_id = value.split(":", 1)[0]
+    if not bot_id.isdigit():
+        raise ValueError("No se pudo identificar el directorio numérico del bot.")
+    return bot_id
 
 
 def _is_within(path: Path, root: Path) -> bool:
@@ -36,13 +43,13 @@ def map_api_file_path(
 
     In --local mode the server may return an absolute container path or a
     relative per-bot path such as ``photos/file_1.jpg``. The target must exist
-    under the configured host root and, when provided, that bot's own folder.
+    under the configured host root and that bot's numeric-ID folder.
     Error text never exposes the token or untrusted path.
     """
     if not settings.telegram_api_local_mode:
         raise RuntimeError("El mapeo local requiere TELEGRAM_API_LOCAL_MODE=true.")
 
-    token_dir = _safe_token_dir(bot_token)
+    bot_dir = _bot_directory_from_token(bot_token)
     server_root = Path(settings.telegram_api_server_files_root).expanduser().resolve()
     host_root = Path(settings.telegram_api_host_files_root).expanduser().resolve()
     raw_text = str(server_file_path).strip()
@@ -54,35 +61,35 @@ def map_api_file_path(
 
     if raw.is_absolute():
         resolved_raw = raw.resolve(strict=False)
-        # Already mapped to the host: accept only the shared root and this bot.
+        # Already mapped to the host: accept only the shared root and this bot ID.
         if _is_within(resolved_raw, host_root):
             relative_host = resolved_raw.relative_to(host_root)
-            if token_dir is None or (relative_host.parts and relative_host.parts[0] == token_dir):
+            if bot_dir is None or (relative_host.parts and relative_host.parts[0] == bot_dir):
                 candidates.append(resolved_raw)
 
-        # Standard local Bot API path: <container-root>/<token>/photos/file.jpg.
+        # The official local Bot API stores each bot under its numeric user ID:
+        # <container-root>/<bot_id>/photos/file.jpg (not under the secret token).
         if _is_within(resolved_raw, server_root):
             relative_server = resolved_raw.relative_to(server_root)
-            if token_dir is not None:
-                if relative_server.parts and relative_server.parts[0] == token_dir:
+            if bot_dir is not None:
+                if relative_server.parts and relative_server.parts[0] == bot_dir:
                     candidates.append(host_root / relative_server)
                 elif relative_server.parts:
-                    # Defensive support for a server path missing its bot prefix.
-                    candidates.append(host_root / token_dir / relative_server)
+                    # Some builds return a path relative to the bot's own folder.
+                    candidates.append(host_root / bot_dir / relative_server)
             elif relative_server.parts and relative_server.parts[0] not in {".", ".."}:
-                # Absolute server paths are unambiguous only if namespaced by bot.
                 candidates.append(host_root / relative_server)
     else:
         if any(part == ".." for part in raw.parts):
             raise ValueError("La ruta relativa devuelta por Telegram no es segura.")
-        if token_dir is None:
+        if bot_dir is None:
             raise ValueError("No se puede resolver una ruta relativa sin el token del bot.")
-        if raw.parts and raw.parts[0] == token_dir:
+        if raw.parts and raw.parts[0] == bot_dir:
             candidates.append(host_root / raw)
         else:
-            candidates.append(host_root / token_dir / raw)
+            candidates.append(host_root / bot_dir / raw)
 
-    token_root = (host_root / token_dir).resolve(strict=False) if token_dir else None
+    bot_root = (host_root / bot_dir).resolve(strict=False) if bot_dir else None
     seen: set[str] = set()
     for candidate in candidates:
         try:
@@ -95,7 +102,7 @@ def map_api_file_path(
         seen.add(key)
         if not _is_within(resolved, host_root) or not resolved.is_file():
             continue
-        if token_root is not None and not _is_within(resolved, token_root):
+        if bot_root is not None and not _is_within(resolved, bot_root):
             continue
         return resolved
 

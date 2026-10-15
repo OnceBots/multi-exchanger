@@ -68,6 +68,12 @@ class FakePipeline:
         self.stored = stored
         self.calls = []
 
+    def is_configured(self):
+        return True
+
+    def configuration_issues(self):
+        return []
+
     async def store_video_once(self, job):
         self.calls.append(("video", job))
         if self.error:
