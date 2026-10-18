@@ -5,10 +5,13 @@
 - La sala acumula únicamente los formatos que habilite el administrador del bot.
 - Cada mensaje multimedia se registra primero en MongoDB. El worker descarga el archivo a un volumen persistente de la aplicación, comprueba el tamaño, hace `fsync` y confirma la ruta en MongoDB.
 - Solo después de confirmar esa copia local intenta borrar el mensaje original del usuario en el chat privado con el bot. Si falla la descarga, la validación o el registro, el mensaje original queda visible.
-- El ZIP se cierra al llegar a 1800 MiB de contenido reservado/real o tras 60 segundos sin nuevos archivos y sin descargas pendientes. El máximo de 1800 MiB queda deliberadamente por debajo del límite de subida del Bot API local para dejar margen a cabeceras y cifrado.
+- Cada usuario tiene su propio paquete dentro de cada sala; el contenido de dos usuarios nunca se mezcla.
+- Para habilitar la entrega debe registrar al menos 10 vídeos únicos, correctamente descargados, en una ventana móvil de 60 minutos. El conteo es individual por usuario y sala; fotos y otros formatos permitidos pueden acompañar el ZIP, pero no cuentan como vídeos para la meta.
+- El ZIP se cierra al llegar a 1800 MiB de contenido reservado/real o tras 60 segundos sin nuevos archivos y sin descargas pendientes. Si no cumple la meta de 10 vídeos, los archivos quedan almacenados en estado `WAITING_QUOTA` hasta que el mismo usuario cumpla el mínimo. El máximo de 1800 MiB queda por debajo del límite de subida del Bot API local para dejar margen a cabeceras y cifrado.
 - La creación del ZIP usa WinZip AES-256 y `ZIP_STORED` (sin recomprimir vídeos ya comprimidos). Se puede extraer con 7-Zip o WinRAR.
-- Se publica una copia fuente en el canal buffer privado y después se copia el mismo mensaje a los miembros de la sala y a los administradores habilitados. La copia final tiene `protect_content=True` cuando Telegram admite esa opción.
-- Los miembros ven un único mensaje de progreso, actualizado automáticamente y con botón para consultar manualmente. Solo los usuarios incluidos en `ADMIN_IDS` ven el botón para cerrar el paquete manualmente.
+- Cada ZIP final se publica y se conserva en el canal configurado `CANAL_STORAGE_ID`. La publicación indica el ID de sala y el ID del usuario propietario del paquete. Después se copia al usuario que aportó los archivos y a `ADMIN_IDS`/administradores habilitados; no se distribuyen los paquetes personales a todos los miembros de la sala. Las copias privadas llevan `protect_content=True` cuando Telegram admite esa opción.
+- Los vídeos se comparan por SHA-256 dentro de la combinación bot/sala/usuario. Un vídeo idéntico ya guardado no se agrega al ZIP ni cuenta para los 10 vídeos; su mensaje original solo se elimina cuando el duplicado se ha registrado y la copia previa está confirmada.
+- El usuario dueño del paquete y los administradores ven el mensaje de progreso, actualizado automáticamente y con botón para consultar manualmente. El mensaje de progreso del usuario se intenta fijar en su chat privado; si Telegram rechaza el pin, no se interrumpe el empaquetado. Solo los usuarios incluidos en `ADMIN_IDS` ven el botón para cerrar el paquete manualmente; el cierre manual no omite la meta horaria.
 - Si una entrega falla, se conserva el ZIP, la copia fuente y el estado en MongoDB para reintentar. Después de entregar a todos, se borran los payloads locales; los registros de archivos/entregas expiran a los 30 días y el resumen exitoso a los 90 días. Los paquetes con errores no expiran automáticamente.
 
 ## Configuración obligatoria antes de aceptar archivos
@@ -25,7 +28,7 @@ Si no hay un `storage_channel_id` numérico configurado, el bot rechaza el archi
 - Webhooks solo registran metadata y encolan trabajo; las descargas, el cifrado ZIP y las copias se ejecutan en tareas de fondo.
 - Hay límites globales para descargas, creación de ZIP, fan-out y actualizaciones de estado. Las actualizaciones de progreso se procesan en lotes de 50 miembros.
 - Se comprueba el espacio libre antes de descargar y antes de crear el ZIP, dejando una reserva de 512 MiB para el sistema.
-- Los items se deduplican por bot/chat/mensaje. El supervisor recupera trabajo pendiente y reconcilia contadores de MongoDB tras interrupciones.
+- Los eventos se deduplican por bot/chat/mensaje y los vídeos por SHA-256 para evitar duplicar contenido. El supervisor recupera trabajo pendiente y reconcilia contadores de MongoDB tras interrupciones.
 - Los originales no se borran si la descarga local o la confirmación duradera fallan. No se borra a mano el cache del directorio del Bot API; ese directorio lo administra su servicio.
 - Los paquetes usan AES-256. En este primer despliegue la contraseña se incluye en el caption del paquete para que el usuario pueda abrirlo sin otro flujo; por tanto, no compartas/reenviés el mensaje de la contraseña por separado, y ten en cuenta que reenviar el mensaje completo también comparte la contraseña del ZIP.
 

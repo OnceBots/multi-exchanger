@@ -81,7 +81,7 @@ def _room_text(room: dict) -> str:
         f"🔐 Código de acceso: <code>{html.escape(str(room.get('invite_code', '')))}</code>\n"
         f"🔑 Contraseña: <b>{'Sí' if room.get('password_protected') else 'No'}</b>\n"
         f"⏳ Expira: <code>{html.escape(str(expiry_text))}</code>\n\n"
-        "El contenido se guarda en Vultr y se agrupa en ZIP con contraseña. El original se elimina solo después de guardarse correctamente. El ZIP se envía al alcanzar el límite o tras 60 segundos sin nuevos archivos."
+        "📦 Cada miembro tiene su propio contador y su ZIP privado. Para habilitar la entrega, ese usuario debe reunir 10 vídeos únicos guardados durante una ventana de 60 minutos. El paquete se cierra al alcanzar 1,8 GiB o tras 60 segundos sin nuevos archivos, cuando ya cumpla el mínimo. El ZIP final queda archivado en el canal configurado y se envía al usuario que aportó el contenido y a los administradores."
     )
 
 
@@ -133,8 +133,9 @@ def build_router(ctx) -> Router:
         text = (
             f"<b>🎬 @{html.escape(ctx.bot_username or str(ctx.bot_id))}</b>\n\n"
             "Una plataforma de salas que recopila multimedia y la agrupa en ZIP protegidos con contraseña. Los administradores pueden habilitar vídeos, fotos, archivos, GIF, audio, notas de voz, stickers y álbumes.\n\n"
-            "📦 El paquete se envía al alcanzar aproximadamente 1,8 GiB o tras 60 segundos sin archivos nuevos. Los originales solo se borran después de descargarse y guardarse correctamente en Vultr.\n\n"
-            "🔐 <b>Privacidad:</b> el contenido del paquete se distribuye a los miembros de la sala y a los administradores habilitados."
+            "📦 <b>Paquetes individuales:</b> cada usuario tiene su propio contador y su propio ZIP. Para habilitar la entrega debe reunir 10 vídeos únicos guardados durante una ventana de 60 minutos. El ZIP se cierra al alcanzar 1,8 GiB o tras 60 segundos sin nuevos archivos, siempre que se cumpla el mínimo.\n\n"
+            "🗂️ Cada ZIP final queda archivado en el canal configurado y se envía en privado a quien aportó esos archivos y a los administradores; no se mezcla ni se entrega a los demás miembros.\n\n"
+            "🔐 Los originales solo se borran después de descargarse y guardarse correctamente en Vultr."
         )
         await message.answer(text, reply_markup=_menu(ctx, int(message.from_user.id)))
         if uid == ctx.owner_id:
@@ -204,8 +205,10 @@ def build_router(ctx) -> Router:
             "• Elige la sala activa desde <b>Mis salas</b>.\n"
             "• Envía contenido multimedia permitido. Otros formatos los habilitan los administradores del bot.\n"
             "• Los archivos se descargan a Vultr; al confirmarse la copia local, el mensaje original se borra.\n"
-            "• El bot agrupa el contenido en ZIP con cifrado AES-256 y lo envía a los miembros de la sala.\n\n"
-            "El ZIP se cierra aproximadamente a 1,8 GiB o tras 60 segundos sin nuevos archivos. Usa 7-Zip o WinRAR para extraerlo.",
+            "• Cada usuario tiene un contador independiente: necesita 10 vídeos únicos guardados durante los últimos 60 minutos para habilitar su ZIP.\n"
+            "• El ZIP final se publica en el canal configurado y se copia en privado al usuario que aportó los archivos y a los administradores. Los ZIP personales no se comparten con los demás miembros.\n"
+            "• Los originales solo se borran tras verificarse la copia local en Vultr.\n\n"
+            "El paquete se cierra al alcanzar aproximadamente 1,8 GiB o tras 60 segundos sin nuevos archivos, una vez cumplida la meta. Usa 7-Zip o WinRAR para extraerlo.",
             reply_markup=_menu(ctx, int(message.from_user.id)),
         )
 
@@ -221,7 +224,7 @@ def build_router(ctx) -> Router:
     async def help_callback(callback: CallbackQuery) -> None:
         await _safe_callback_answer(callback)
         await callback.message.edit_text(
-            "<b>❓ Cómo funciona</b>\n\n1. Crea o únete a una sala.\n2. Selecciona la sala activa.\n3. Envía los archivos multimedia permitidos.\n4. El bot confirma la descarga en Vultr y después borra el mensaje original.\n5. Los archivos se agrupan en un ZIP cifrado con AES-256, que se envía a los miembros.\n\nEl paquete se cierra al alcanzar aproximadamente 1,8 GiB o tras 60 segundos sin nuevos archivos. El progreso se muestra en un mensaje actualizable. Por defecto solo se permiten vídeos; ADMIN_IDS controla los demás formatos desde 🛡️ Moderación.",
+            "<b>❓ Cómo funciona</b>\n\n1. Crea o únete a una sala.\n2. Selecciona la sala activa.\n3. Envía los archivos multimedia permitidos.\n4. El bot confirma la descarga en Vultr y después borra el mensaje original.\n5. Tu contador personal necesita 10 vídeos únicos guardados en una ventana móvil de 60 minutos. Fotos u otros formatos permitidos pueden acompañar tu ZIP, pero no cuentan como vídeos.\n6. Al cumplir la meta, el ZIP cifrado con AES-256 se publica en el canal configurado y se envía en privado a ti y a los administradores.\n\nEl ZIP se cierra al alcanzar aproximadamente 1,8 GiB o tras 60 segundos sin nuevos archivos, siempre que se haya cumplido la meta. El progreso se muestra en un mensaje actualizable. Por defecto solo se permiten vídeos; ADMIN_IDS controla los demás formatos desde 🛡️ Moderación.",
             reply_markup=_menu(ctx, int(callback.from_user.id)),
         )
 
@@ -469,10 +472,16 @@ def build_router(ctx) -> Router:
         if not package:
             await _safe_callback_answer(callback, "Este paquete ya no está disponible.", show_alert=True)
             return
-        is_member = await ctx.repositories.room.is_member(ctx.bot_id, str(package.get("room_id", "")), uid)
-        if uid not in ctx.settings.admin_ids and not is_member:
-            await _safe_callback_answer(callback, "No estás autorizado para ver este paquete.", show_alert=True)
-            return
+        owner_id = package.get("sender_id")
+        if uid not in ctx.settings.admin_ids:
+            if owner_id is not None:
+                authorized = uid == int(owner_id)
+            else:
+                # Legacy room-wide packages keep the old member-based access rule.
+                authorized = await ctx.repositories.room.is_member(ctx.bot_id, str(package.get("room_id", "")), uid)
+            if not authorized:
+                await _safe_callback_answer(callback, "No estás autorizado para ver este paquete.", show_alert=True)
+                return
         text, _ = await ctx.services.packages.status_text(package_id)
         await _safe_callback_answer(callback, "Estado actualizado")
         try:

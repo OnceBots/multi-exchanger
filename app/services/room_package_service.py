@@ -19,6 +19,8 @@ from app.core.crypto import SecretBox
 from app.core.datetime import utcnow
 
 _MIB = 1024 * 1024
+_MIN_VIDEOS_PER_USER_HOUR = 10
+_VIDEO_QUOTA_WINDOW = timedelta(hours=1)
 # Shared limits across all child bots in this application process. Heavy work is
 # moved off the webhook event path and these semaphores keep many rooms/bots
 # from saturating the server all at once.
@@ -110,6 +112,10 @@ class RoomPackageService:
             mapping[key] = lock
         return lock
 
+    @staticmethod
+    def _user_scope_key(room_id: str, sender_id: int) -> str:
+        return f"{room_id}:{int(sender_id)}"
+
     async def enqueue(self, message, room_id: str, media_type: str, file_id: str, expected_size: int, filename: str | None) -> tuple[bool, str | None, str | None]:
         """Persist a queue item before returning; never delete the user's source here."""
         # A private source buffer is required because delivery fans out from one
@@ -123,6 +129,8 @@ class RoomPackageService:
             return False, None, f"Este archivo pesa {format_bytes(expected_size)} y supera el máximo por archivo ({format_bytes(self.max_bytes)}). No se borró el original."
         chat_id = int(message.chat.id)
         message_id = int(message.message_id)
+        sender_id = int(message.from_user.id)
+        scope_key = self._user_scope_key(str(room_id), sender_id)
         item_id = hashlib.sha256(f"{self.ctx.bot_id}:{chat_id}:{message_id}".encode()).hexdigest()[:32]
         item_existing = await self.repo.get_item(self.ctx.bot_id, item_id)
         if item_existing:
@@ -130,7 +138,7 @@ class RoomPackageService:
             await self.schedule_progress_refresh(str(item_existing.get("package_id") or ""))
             return True, item_id, None
 
-        lock = self._lock(self._assignment_locks, str(room_id))
+        lock = self._lock(self._assignment_locks, scope_key)
         async with lock:
             # A duplicate can arrive while another webhook is assigning this item.
             item_existing = await self.repo.get_item(self.ctx.bot_id, item_id)
@@ -138,7 +146,7 @@ class RoomPackageService:
                 self._queue_item(item_id)
                 return True, item_id, None
 
-            package = await self.repo.get_open_package(self.ctx.bot_id, room_id)
+            package = await self.repo.get_open_package(self.ctx.bot_id, room_id, sender_id)
             if package and int(package.get("item_count", 0)) > 0:
                 projected = int(package.get("reserved_bytes", 0)) + expected_size
                 if expected_size and projected > self.max_bytes:
@@ -146,14 +154,14 @@ class RoomPackageService:
                     await self.schedule_progress_refresh(package["package_id"])
                     package = None
             if package is None:
-                package = await self.repo.create_package(self.ctx.bot_id, room_id)
+                package = await self.repo.create_package(self.ctx.bot_id, room_id, sender_id)
 
             name = safe_archive_filename(filename, self._default_filename(media_type, message_id))
             item = {
                 "item_id": item_id,
                 "package_id": str(package["package_id"]),
                 "room_id": str(room_id),
-                "sender_id": int(message.from_user.id),
+                "sender_id": sender_id,
                 "original_chat_id": chat_id,
                 "original_message_id": message_id,
                 "file_id": str(file_id),
@@ -234,21 +242,37 @@ class RoomPackageService:
                     last_sync = self._last_counters_reconcile.get(package_id, 0.0)
                     if time.monotonic() - last_sync >= 12.0 and state not in {"SENT", "FAILED", "EMPTY"}:
                         room_key = str(package.get("room_id") or "")
-                        async with self._lock(self._assignment_locks, room_key):
+                        scope_key = self._user_scope_key(room_key, int(package.get("sender_id", 0) or 0)) if package.get("sender_id") is not None else room_key
+                        async with self._lock(self._assignment_locks, scope_key):
                             await self.repo.reconcile_package_counters(self.ctx.bot_id, package_id)
                             package = await self.repo.get_package(self.ctx.bot_id, package_id) or package
                             state = str(package.get("state") or state)
                             self._last_counters_reconcile[package_id] = time.monotonic()
+                    sender_id = package.get("sender_id")
+                    recent_video_count = None
+                    if sender_id is not None:
+                        recent_video_count = await self.repo.count_recent_user_videos(
+                            self.ctx.bot_id, str(package.get("room_id") or ""), int(sender_id),
+                            utcnow() - _VIDEO_QUOTA_WINDOW,
+                        )
+                        package["recent_video_count"] = recent_video_count
+                        if recent_video_count >= _MIN_VIDEOS_PER_USER_HOUR and not package.get("quota_met_at"):
+                            await self.repo.set_package_fields(
+                                self.ctx.bot_id, package_id, {"quota_met_at": utcnow(), "quota_video_count": recent_video_count}
+                            )
+                            package["quota_met_at"] = utcnow()
+                            await self.schedule_progress_refresh(package_id)
+                    quota_met = sender_id is None or bool(package.get("quota_met_at"))
                     if state == "OPEN" and int(package.get("pending_count", 0)) == 0:
                         last = package.get("last_item_at") or package.get("created_at") or utcnow()
                         idle_for = (utcnow() - last).total_seconds()
-                        if int(package.get("item_count", 0)) > 0 and idle_for >= self.idle_seconds:
+                        if int(package.get("item_count", 0)) > 0 and idle_for >= self.idle_seconds and quota_met:
                             await self.repo.close_package(self.ctx.bot_id, package_id, "idle_timeout")
                             await self.schedule_progress_refresh(package_id)
                             package = await self.repo.get_package(self.ctx.bot_id, package_id) or package
                             state = str(package.get("state") or "")
                         elif int(package.get("item_count", 0)) <= 0 and idle_for >= self.idle_seconds:
-                            # Failed-only packages must not remain OPEN forever.
+                            # Empty/duplicate-only collections should not stay open forever.
                             await self.repo.set_package_fields(
                                 self.ctx.bot_id, package_id,
                                 {"state": "EMPTY", "completed_at": utcnow(), "last_error": "no_staged_items"},
@@ -257,6 +281,27 @@ class RoomPackageService:
                             await self.schedule_progress_refresh(package_id)
                             package = await self.repo.get_package(self.ctx.bot_id, package_id) or package
                             state = str(package.get("state") or "")
+                        elif int(package.get("item_count", 0)) > 0 and idle_for >= self.idle_seconds and not quota_met:
+                            # Keep the sender's files safe until they meet the per-user rolling-hour quota.
+                            await self.schedule_progress_refresh(package_id)
+                    if state == "CLOSING" and int(package.get("pending_count", 0)) <= 0 and int(package.get("staged_count", 0)) > 0 and sender_id is not None and not quota_met:
+                        await self.repo.set_package_fields(
+                            self.ctx.bot_id, package_id,
+                            {"state": "WAITING_QUOTA", "waiting_quota_since": utcnow()},
+                            expected_state="CLOSING",
+                        )
+                        package = await self.repo.get_package(self.ctx.bot_id, package_id) or package
+                        state = str(package.get("state") or "")
+                        await self.schedule_progress_refresh(package_id)
+                    if state == "WAITING_QUOTA" and int(package.get("pending_count", 0)) <= 0 and int(package.get("staged_count", 0)) > 0 and quota_met:
+                        await self.repo.set_package_fields(
+                            self.ctx.bot_id, package_id,
+                            {"state": "CLOSING", "quota_met_at": package.get("quota_met_at") or utcnow(), "close_reason": "user_hourly_quota"},
+                            expected_state="WAITING_QUOTA",
+                        )
+                        package = await self.repo.get_package(self.ctx.bot_id, package_id) or package
+                        state = str(package.get("state") or "")
+                        await self.schedule_progress_refresh(package_id)
                     if state == "SENT" and not package.get("files_cleaned", False):
                         try:
                             await asyncio.to_thread(shutil.rmtree, self._package_dir(str(package["room_id"]), package_id), True)
@@ -310,10 +355,12 @@ class RoomPackageService:
         if item.get("status") == "STAGED_DELETE_PENDING":
             await self._delete_source_after_staging(item)
             return
-        if item.get("status") == "STAGED" or item.get("status") == "FAILED":
+        if item.get("status") in {"STAGED", "FAILED", "DUPLICATE"}:
             return
         room_id = str(item.get("room_id") or "")
-        async with self._lock(self._download_locks, room_id):
+        sender_id = int(item.get("sender_id", 0) or 0)
+        scope_key = self._user_scope_key(room_id, sender_id)
+        async with self._lock(self._download_locks, scope_key):
             # Re-read after waiting for a per-room lock: another retry may finish it.
             item = await self.repo.get_item(self.ctx.bot_id, item_id)
             if not item or item.get("status") not in {"QUEUED", "DOWNLOADING"}:
@@ -352,6 +399,40 @@ class RoomPackageService:
                     raise RuntimeError(f"El archivo supera el máximo del paquete ({format_bytes(self.max_bytes)}); no se borró el original.")
                 # Move out of temporary suffix only after the download is complete.
                 os.replace(staged_tmp, incoming_path)
+                content_sha256 = None
+                if str(item.get("media_type") or "") == "video":
+                    content_sha256 = await asyncio.to_thread(self._sha256_file, incoming_path)
+                    duplicate = await self.repo.find_staged_duplicate(
+                        self.ctx.bot_id, room_id, sender_id, content_sha256
+                    )
+                    if duplicate:
+                        duplicate_package = await self.repo.get_package(
+                            self.ctx.bot_id, str(duplicate.get("package_id") or "")
+                        )
+                        duplicate_path = Path(str(duplicate.get("staged_path") or ""))
+                        durable_duplicate = bool(
+                            duplicate_path.is_file()
+                            and duplicate_path.stat().st_size == int(duplicate.get("staged_size", -1))
+                        ) or bool(duplicate_package and (
+                            duplicate_package.get("state") == "SENT"
+                            or duplicate_package.get("delivery_source_message_id")
+                            or (duplicate_package.get("archive_path") and Path(str(duplicate_package["archive_path"])).is_file())
+                        ))
+                        if durable_duplicate:
+                            async with self._lock(self._assignment_locks, scope_key):
+                                duplicate_marked = await self.repo.mark_item_duplicate(
+                                    self.ctx.bot_id, item, str(duplicate["item_id"]), content_sha256
+                                )
+                            if duplicate_marked:
+                                incoming_path.unlink(missing_ok=True)
+                                duplicate_item = await self.repo.get_item(self.ctx.bot_id, item_id) or item
+                                await self._delete_source_after_duplicate(duplicate_item)
+                                await self.schedule_progress_refresh(str(item.get("package_id") or ""))
+                                self.logger.info(
+                                    "room_package_duplicate_video_omitted bot_id=%s room_id=%s sender_id=%s item_id=%s duplicate_of=%s",
+                                    self.ctx.bot_id, room_id, sender_id, item_id, duplicate.get("item_id"),
+                                )
+                                return
                 item = await self._fit_item_in_package(item, actual_size)
                 package_dir = self._package_dir(room_id, str(item["package_id"]))
                 files_dir = package_dir / "files"
@@ -362,8 +443,8 @@ class RoomPackageService:
                 await asyncio.to_thread(self._fsync_directory, files_dir)
                 # Mark and verify the durable copy before deleting the member's
                 # source message. Never trust a bare successful file move alone.
-                async with self._lock(self._assignment_locks, room_id):
-                    staged_ok = await self.repo.mark_staged(self.ctx.bot_id, item, str(target_path), actual_size)
+                async with self._lock(self._assignment_locks, scope_key):
+                    staged_ok = await self.repo.mark_staged(self.ctx.bot_id, item, str(target_path), actual_size, content_sha256)
                 staged_item = await self.repo.get_item(self.ctx.bot_id, item_id) or item
                 if (
                     not staged_ok
@@ -399,7 +480,7 @@ class RoomPackageService:
                     except OSError:
                         pass
                 if current and current.get("status") in {"QUEUED", "DOWNLOADING"}:
-                    async with self._lock(self._assignment_locks, room_id):
+                    async with self._lock(self._assignment_locks, scope_key):
                         await self.repo.mark_item_failed(self.ctx.bot_id, current, str(exc))
                     await self._notify_source_failure(item, str(exc))
                     await self.schedule_progress_refresh(str(current.get("package_id") or ""))
@@ -530,11 +611,13 @@ class RoomPackageService:
 
     async def _fit_item_in_package(self, item: dict, actual_size: int) -> dict:
         room_id = str(item["room_id"])
-        async with self._lock(self._assignment_locks, room_id):
+        sender_id = int(item.get("sender_id", 0) or 0)
+        scope_key = self._user_scope_key(room_id, sender_id)
+        async with self._lock(self._assignment_locks, scope_key):
             current = await self.repo.get_item(self.ctx.bot_id, str(item["item_id"])) or item
             package = await self.repo.get_package(self.ctx.bot_id, str(current["package_id"]))
             if not package:
-                package = await self.repo.create_package(self.ctx.bot_id, room_id)
+                package = await self.repo.create_package(self.ctx.bot_id, room_id, sender_id)
                 await self.repo.update_item_package(self.ctx.bot_id, str(current["item_id"]), str(package["package_id"]), actual_size)
                 current["package_id"] = str(package["package_id"])
                 current["expected_size"] = actual_size
@@ -548,13 +631,13 @@ class RoomPackageService:
             projected = int(package.get("reserved_bytes", 0)) - expected + actual_size
             if projected > self.max_bytes and int(package.get("item_count", 0)) > 1:
                 await self.repo.close_package(self.ctx.bot_id, package["package_id"], "size_limit_actual")
-                new_package = await self.repo.get_open_package(self.ctx.bot_id, room_id)
+                new_package = await self.repo.get_open_package(self.ctx.bot_id, room_id, sender_id)
                 if new_package and int(new_package.get("reserved_bytes", 0)) + actual_size > self.max_bytes:
                     await self.repo.close_package(self.ctx.bot_id, new_package["package_id"], "size_limit_actual")
                     await self.schedule_progress_refresh(new_package["package_id"])
                     new_package = None
                 if new_package is None:
-                    new_package = await self.repo.create_package(self.ctx.bot_id, room_id)
+                    new_package = await self.repo.create_package(self.ctx.bot_id, room_id, sender_id)
                 current = await self.repo.reassign_item(self.ctx.bot_id, current, new_package, actual_size)
                 await self.schedule_progress_refresh(package["package_id"])
                 await self.schedule_progress_refresh(new_package["package_id"])
@@ -576,7 +659,8 @@ class RoomPackageService:
                 raise OSError("staged file size mismatch")
         except (OSError, ValueError, RuntimeError):
             await self.repo.mark_staged_storage_failed(self.ctx.bot_id, str(current["item_id"]), "staged_file_missing_or_invalid")
-            async with self._lock(self._assignment_locks, str(current.get("room_id") or "")):
+            scope_key = self._user_scope_key(str(current.get("room_id") or ""), int(current.get("sender_id", 0) or 0))
+            async with self._lock(self._assignment_locks, scope_key):
                 await self.repo.reconcile_package_counters(self.ctx.bot_id, str(current.get("package_id") or ""))
             await self._notify_source_failure(current, "staged_file_missing_or_invalid")
             self.logger.error("room_package_source_delete_skipped_invalid_staged_file bot_id=%s item_id=%s", self.ctx.bot_id, current.get("item_id"))
@@ -599,6 +683,31 @@ class RoomPackageService:
                 await self.ctx.bot.send_message(
                     chat_id=int(item["sender_id"]),
                     text="✅ El archivo ya está guardado en el paquete, pero Telegram no permitió borrar el mensaje original. No hace falta volver a enviarlo.",
+                )
+            except Exception:
+                pass
+
+    async def _delete_source_after_duplicate(self, item: dict) -> None:
+        """Delete an exact duplicate only after both its hash and durable prior copy are recorded."""
+        current = await self.repo.get_item(self.ctx.bot_id, str(item.get("item_id") or ""))
+        if not current or current.get("status") != "DUPLICATE" or not current.get("duplicate_of_item_id"):
+            return
+        try:
+            await self.ctx.bot.delete_message(
+                chat_id=int(current["original_chat_id"]),
+                message_id=int(current["original_message_id"]),
+            )
+            await self.repo.mark_duplicate_source_deleted(self.ctx.bot_id, current["item_id"], deleted=True)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            await self.repo.mark_duplicate_source_deleted(
+                self.ctx.bot_id, current["item_id"], deleted=False, error=type(exc).__name__
+            )
+            try:
+                await self.ctx.bot.send_message(
+                    chat_id=int(current["sender_id"]),
+                    text="ℹ️ Este vídeo ya está guardado en tu paquete y no se añadirá dos veces, pero Telegram no permitió borrar el mensaje duplicado.",
                 )
             except Exception:
                 pass
@@ -660,13 +769,27 @@ class RoomPackageService:
         lock = self._lock(self._status_locks, package_id)
         async with lock:
             package = await self.repo.get_package(self.ctx.bot_id, package_id) or package
-            text = self._status_text(package)
             room_id = str(package["room_id"])
-            members = await self.ctx.repositories.room.members_for_room(self.ctx.bot_id, room_id)
+            if package.get("sender_id") is not None:
+                package["recent_video_count"] = await self.repo.count_recent_user_videos(
+                    self.ctx.bot_id, room_id, int(package["sender_id"]), utcnow() - _VIDEO_QUOTA_WINDOW
+                )
+                package["recent_video_quota"] = _MIN_VIDEOS_PER_USER_HOUR
+            text = self._status_text(package)
+            if package.get("sender_id") is not None:
+                recipients = {int(package["sender_id"])}
+            else:
+                # Legacy room-scoped packages retain their historical status audience.
+                members = await self.ctx.repositories.room.members_for_room(self.ctx.bot_id, room_id)
+                recipients = {int(member["user_id"]) for member in members}
+            recipients.update(int(uid) for uid in self.ctx.settings.admin_ids)
+            try:
+                recipients.update(int(uid) for uid in await self.ctx.services.admin_feed.enabled_admins())
+            except Exception:
+                self.logger.debug("room_package_status_admin_recipients_unavailable bot_id=%s", self.ctx.bot_id)
             semaphore = asyncio.Semaphore(2)
 
-            async def update_one(member: dict) -> None:
-                uid = int(member["user_id"])
+            async def update_one(uid: int) -> None:
                 async with semaphore, _GLOBAL_STATUS_SEMAPHORE:
                     old_id = (package.get("status_message_ids") or {}).get(str(uid))
                     markup = self._status_markup(package_id, uid)
@@ -685,15 +808,36 @@ class RoomPackageService:
                         await self._pace_outbound_call()
                         sent = await asyncio.wait_for(self.ctx.bot.send_message(uid, text, reply_markup=markup), timeout=20)
                         await self.repo.set_status_message(self.ctx.bot_id, package_id, uid, int(sent.message_id))
+                        # Keep the contributor's current package progress easy to find.
+                        # Pinning is best-effort; a Telegram pin failure must never
+                        # interrupt downloads, quota counting or ZIP delivery.
+                        if package.get("sender_id") is not None and uid == int(package["sender_id"]):
+                            try:
+                                await self._pace_outbound_call()
+                                await asyncio.wait_for(
+                                    self.ctx.bot.pin_chat_message(
+                                        chat_id=uid,
+                                        message_id=int(sent.message_id),
+                                        disable_notification=True,
+                                    ),
+                                    timeout=15,
+                                )
+                            except Exception as pin_exc:
+                                self.logger.debug(
+                                    "room_package_status_pin_failed bot_id=%s package_id=%s user_id=%s error_type=%s",
+                                    self.ctx.bot_id, package_id, uid, type(pin_exc).__name__,
+                                )
                     except Exception as exc:
                         self.logger.debug("room_package_status_send_failed bot_id=%s room_id=%s user_id=%s error_type=%s", self.ctx.bot_id, room_id, uid, type(exc).__name__)
 
             # Never materialize a task for every room member at once. Rooms can
             # contain thousands of users; batches keep memory and API pressure bounded.
             batch_size = 50
-            for start in range(0, len(members), batch_size):
+            recipient_list = sorted(recipients)
+            for start in range(0, len(recipient_list), batch_size):
+                batch = recipient_list[start:start + batch_size]
                 await asyncio.gather(
-                    *(update_one(member) for member in members[start:start + batch_size]),
+                    *(update_one(uid) for uid in batch),
                     return_exceptions=True,
                 )
 
@@ -706,8 +850,24 @@ class RoomPackageService:
         last = package.get("last_item_at") or package.get("created_at") or utcnow()
         idle_left = max(0, self.idle_seconds - int((utcnow() - last).total_seconds()))
         state = str(package.get("state") or "OPEN")
+        recent_video_count = package.get("recent_video_count")
+        quota_line = ""
+        if package.get("sender_id") is not None:
+            recent_video_count = max(0, int(recent_video_count or 0))
+            quota_met = bool(package.get("quota_met_at")) or recent_video_count >= _MIN_VIDEOS_PER_USER_HOUR
+            remaining_videos = max(0, _MIN_VIDEOS_PER_USER_HOUR - recent_video_count)
+            quota_line = (
+                f"🎬 Vídeos únicos tuyos en la última hora: <b>{min(recent_video_count, _MIN_VIDEOS_PER_USER_HOUR)}/{_MIN_VIDEOS_PER_USER_HOUR}</b>\n"
+                + ("✅ Mínimo horario alcanzado.\n" if quota_met else f"📌 Te faltan <b>{remaining_videos}</b> vídeo(s) válido(s) para habilitar el ZIP.\n")
+            )
         if state == "OPEN":
-            close_text = f"⏳ Cierre por inactividad en aproximadamente <b>{idle_left} s</b>." if pending == 0 else "⏳ El temporizador de inactividad espera a que terminen las descargas pendientes."
+            if package.get("sender_id") is not None and not quota_met:
+                close_text = ("⏳ Esperando a que llegues al mínimo de vídeos únicos para habilitar la entrega." if pending == 0
+                              else "⏳ Esperando que terminen las descargas; el mínimo se cuenta solo con tus vídeos guardados.")
+            else:
+                close_text = f"⏳ Cierre por inactividad en aproximadamente <b>{idle_left} s</b>." if pending == 0 else "⏳ El temporizador de inactividad espera a que terminen las descargas pendientes."
+        elif state == "WAITING_QUOTA":
+            close_text = "⏳ Archivos guardados; el ZIP espera a que alcances el mínimo de vídeos de la última hora."
         elif state == "CLOSING":
             close_text = "📦 Límite alcanzado: cerrando cuando terminen las descargas pendientes."
         elif state in {"PROCESSING", "DELIVERING"}:
@@ -726,7 +886,8 @@ class RoomPackageService:
             f"{progress_bar(used, self.max_bytes)} <b>{percent}%</b>\n"
             f"📊 Acumulado: <b>{format_bytes(used)}</b> / {format_bytes(self.max_bytes)}\n"
             f"📉 Falta para completar: <b>{format_bytes(max(0, self.max_bytes - used))}</b>\n"
-            f"📁 En paquete: <b>{count}</b> · descargados: <b>{staged}</b> · pendientes: <b>{pending}</b> · fallidos: <b>{failed}</b>\n"
+            f"📁 En paquete: <b>{count}</b> · descargados: <b>{staged}</b> · pendientes: <b>{pending}</b> · fallidos: <b>{failed}</b> · duplicados: <b>{int(package.get('duplicate_count', 0) or 0)}</b>\n"
+            f"{quota_line}"
             f"{close_text}\n\n"
             "El original se borra solamente después de guardarse en Vultr. Si la descarga falla, se conserva."
         )
@@ -743,6 +904,10 @@ class RoomPackageService:
         package = await self.repo.get_package(self.ctx.bot_id, package_id)
         if not package:
             return "Este paquete ya no está disponible.", None
+        if package.get("sender_id") is not None:
+            package["recent_video_count"] = await self.repo.count_recent_user_videos(
+                self.ctx.bot_id, str(package.get("room_id") or ""), int(package["sender_id"]), utcnow() - _VIDEO_QUOTA_WINDOW
+            )
         return self._status_text(package), package
 
     async def close_now(self, package_id: str) -> bool:
@@ -769,12 +934,31 @@ class RoomPackageService:
             if not package:
                 return
             state = str(package.get("state") or "")
+            if state == "CLOSING" and package.get("sender_id") is not None and not package.get("quota_met_at"):
+                recent_video_count = await self.repo.count_recent_user_videos(
+                    self.ctx.bot_id, str(package.get("room_id") or ""), int(package["sender_id"]),
+                    utcnow() - _VIDEO_QUOTA_WINDOW,
+                )
+                if recent_video_count < _MIN_VIDEOS_PER_USER_HOUR:
+                    await self.repo.set_package_fields(
+                        self.ctx.bot_id, package_id,
+                        {"state": "WAITING_QUOTA", "waiting_quota_since": utcnow(), "recent_video_count": recent_video_count},
+                        expected_state="CLOSING",
+                    )
+                    await self.schedule_progress_refresh(package_id)
+                    return
+                await self.repo.set_package_fields(
+                    self.ctx.bot_id, package_id,
+                    {"quota_met_at": utcnow(), "quota_video_count": recent_video_count},
+                )
+                package["quota_met_at"] = utcnow()
             if state == "CLOSING":
                 if int(package.get("pending_count", 0)) > 0 or int(package.get("staged_count", 0)) == 0:
                     return
                 password = secrets.token_urlsafe(15)
                 safe_room_id = self._safe_path_component(str(package["room_id"]), "room")
-                archive_path = self._package_dir(str(package["room_id"]), package_id) / f"room-{safe_room_id}-{package_id}.zip"
+                owner_suffix = f"-user-{int(package['sender_id'])}" if package.get("sender_id") is not None else ""
+                archive_path = self._package_dir(str(package["room_id"]), package_id) / f"room-{safe_room_id}{owner_suffix}-{package_id}.zip"
                 changed = await self.repo.set_package_fields(
                     self.ctx.bot_id, package_id,
                     {"state": "PROCESSING", "password_encrypted": self.secret_box.encrypt(password), "archive_path": str(archive_path), "archive_name": archive_path.name, "processing_started_at": utcnow()},
@@ -874,13 +1058,9 @@ class RoomPackageService:
                 else:
                     await self.repo.set_package_fields(self.ctx.bot_id, package_id, {"state": "SENT", "completed_at": utcnow(), "delivery_failed_count": 0})
                     await self._cleanup_status_messages(package)
-                    source_for_cleanup = await self.repo.get_delivery_source(self.ctx.bot_id, package_id)
-                    if source_for_cleanup:
-                        try:
-                            await self.ctx.bot.delete_message(chat_id=source_for_cleanup[0], message_id=source_for_cleanup[1])
-                        except Exception as exc:
-                            self.logger.info("room_package_buffer_message_cleanup_failed bot_id=%s package_id=%s error_type=%s", self.ctx.bot_id, package_id, type(exc).__name__)
-                    # The encrypted archive contains a durable copy of every item.
+                    # The configured channel is the permanent archive destination.
+                    # Keep its ZIP post for future retrieval/audit; only local files are cleaned.
+                    # The encrypted archive also remains available to the sender and admins.
                     # Remove local payloads only after all recipients were served.
                     await asyncio.to_thread(shutil.rmtree, self._package_dir(str(package["room_id"]), package_id), True)
                     completed_at = utcnow()
@@ -897,13 +1077,24 @@ class RoomPackageService:
                     )
                     await self.repo.expire_package_items_in(self.ctx.bot_id, package_id, completed_at + timedelta(days=30))
                     await self.repo.expire_deliveries_in(self.ctx.bot_id, package_id, completed_at + timedelta(days=30))
-                    self.logger.info("room_package_sent bot_id=%s room_id=%s package_id=%s files=%s archive_bytes=%s recipients=%s", self.ctx.bot_id, package["room_id"], package_id, package.get("staged_count", 0), package.get("archive_size", 0), len(targets))
+                    self.logger.info("room_package_sent bot_id=%s room_id=%s sender_id=%s package_id=%s files=%s archive_bytes=%s recipient_count=%s channel_post_kept=%s", self.ctx.bot_id, package["room_id"], package.get("sender_id"), package_id, package.get("staged_count", 0), package.get("archive_size", 0), len(targets), bool(package.get("delivery_source_message_id")))
         except asyncio.CancelledError:
             raise
         except Exception:
             self.logger.exception("room_package_finalize_failed bot_id=%s package_id=%s", self.ctx.bot_id, package_id)
         finally:
             self._finalize_tasks.pop(package_id, None)
+
+    @staticmethod
+    def _sha256_file(path: Path) -> str:
+        digest = hashlib.sha256()
+        with Path(path).open("rb") as handle:
+            while True:
+                chunk = handle.read(1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+        return digest.hexdigest()
 
     @staticmethod
     def _build_encrypted_zip(archive_path: Path, items: list[dict], password: str) -> None:
@@ -941,11 +1132,13 @@ class RoomPackageService:
 
     async def _recipient_ids(self, package: dict) -> list[int]:
         room_id = str(package["room_id"])
-        members = await self.ctx.repositories.room.members_for_room(self.ctx.bot_id, room_id)
-        # Room packages are a delivery feature, not the optional moderation-feed
-        # preference. Every configured ADMIN_IDS must receive the same ZIP even
-        # when that admin has disabled the separate live feed.
-        ids = {int(member["user_id"]) for member in members}
+        # New packages are private to the member who contributed them. Only
+        # legacy room-wide packages (without sender_id) retain the old audience.
+        if package.get("sender_id") is not None:
+            ids = {int(package["sender_id"])}
+        else:
+            members = await self.ctx.repositories.room.members_for_room(self.ctx.bot_id, room_id)
+            ids = {int(member["user_id"]) for member in members}
         ids.update(int(uid) for uid in self.ctx.settings.admin_ids)
         try:
             admin_ids = await self.ctx.services.admin_feed.enabled_admins()
@@ -975,10 +1168,12 @@ class RoomPackageService:
 
         caption = (
             "📦 Paquete multimedia de la sala\n"
-            f"📁 Archivos: {int(package.get('staged_count', 0))}\n"
+            f"🏠 Sala: <code>{html.escape(str(package.get('room_id') or ''))}</code>\n"
+            + (f"👤 Usuario ID: <code>{int(package['sender_id'])}</code>\n" if package.get("sender_id") is not None else "")
+            + f"📁 Archivos: {int(package.get('staged_count', 0))}\n"
             f"📦 Tamaño: {format_bytes(int(package.get('archive_size', 0)))}\n"
             f"🔐 Contraseña AES-256: <code>{html.escape(password)}</code>\n"
-            "Para extraerlo, usa 7-Zip o WinRAR."
+            "📌 Copia final conservada en este canal. Para extraerlo, usa 7-Zip o WinRAR."
         )
         try:
             await self._pace_outbound_call()
@@ -993,7 +1188,7 @@ class RoomPackageService:
             source_message = int(sent.message_id)
             await self.repo.set_package_fields(
                 self.ctx.bot_id, package["package_id"],
-                {"delivery_source_chat_id": source_chat, "delivery_source_message_id": source_message, "delivery_source_chat": "storage_buffer", "state": "DELIVERING"},
+                {"delivery_source_chat_id": source_chat, "delivery_source_message_id": source_message, "delivery_source_chat": "configured_archive_channel", "channel_archive_kept": True, "state": "DELIVERING"},
             )
             return source_chat, source_message
         except asyncio.CancelledError:
