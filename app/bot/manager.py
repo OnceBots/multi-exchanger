@@ -274,6 +274,9 @@ class BotManager:
                 runtime.ctx = runtime.build_context(self.mongo.db, self.settings, self.repositories, None)
                 build_child_services(runtime.ctx)
                 dispatcher.include_router(build_child_router(runtime.ctx))
+                # Consolidate V3 per-user batches into the shared room accumulator
+                # before the webhook starts accepting new media updates.
+                await runtime.ctx.services.packages.migrate_legacy_packages()
 
                 if self.settings.environment == "production" or self.settings.mode == "webhook":
                     url = f"{self.settings.webhook_base_url}/telegram/webhook/{bot_id}"

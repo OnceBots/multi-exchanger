@@ -61,6 +61,8 @@ async def ensure_indexes(mongo) -> None:
         partialFilterExpression={"content_sha256": {"$type": "string"}},
     )
     await package_items.create_index([("bot_id", 1), ("room_id", 1), ("sender_id", 1), ("media_type", 1), ("staged_at", -1)])
+    await package_items.create_index([("bot_id", 1), ("room_id", 1), ("media_type", 1), ("staged_at", -1), ("sender_id", 1)])
+    await package_items.create_index([("bot_id", 1), ("room_id", 1), ("media_type", 1), ("content_sha256", 1), ("status", 1)])
     await package_items.create_index("expire_at", expireAfterSeconds=0)
     await package_deliveries.create_index([("bot_id", 1), ("package_id", 1), ("user_id", 1)], unique=True)
     await package_deliveries.create_index("expire_at", expireAfterSeconds=0)

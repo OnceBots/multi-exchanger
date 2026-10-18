@@ -568,7 +568,7 @@ def build_router(ctx) -> Router:
             if not authorized:
                 await _safe_callback_answer(callback, "No estás autorizado para ver este paquete.", show_alert=True)
                 return
-        text, _ = await ctx.services.packages.status_text(package_id)
+        text, _ = await ctx.services.packages.status_text(package_id, uid)
         await _safe_callback_answer(callback, "Estado actualizado")
         try:
             await callback.message.edit_text(text, reply_markup=ctx.services.packages._status_markup(package_id, uid))
@@ -588,7 +588,7 @@ def build_router(ctx) -> Router:
             await _safe_callback_answer(callback, "El paquete ya está cerrado o no existe.", show_alert=True)
             return
         await _safe_callback_answer(callback, "Se cerrará cuando terminen las descargas pendientes.")
-        text, _ = await ctx.services.packages.status_text(package_id)
+        text, _ = await ctx.services.packages.status_text(package_id, uid)
         try:
             await callback.message.edit_text(text, reply_markup=ctx.services.packages._status_markup(package_id, uid))
         except Exception as exc:

@@ -186,6 +186,118 @@ def test_status_text_explains_user_hourly_video_quota(tmp_path):
     assert "duplicados" in text.lower()
 
 @pytest.mark.asyncio
+async def test_shared_room_package_delivers_to_eligible_members_and_admins_only(tmp_path):
+    service = build_service(tmp_path)
+
+    class RoomRepo:
+        async def members_for_room(self, bot_id, room_id):
+            return [{"user_id": 101}, {"user_id": 202}, {"user_id": 303}]
+
+    class AdminFeed:
+        async def enabled_admins(self):
+            return [999]
+
+    service.ctx.repositories.room = RoomRepo()
+    service.ctx.services = SimpleNamespace(admin_feed=AdminFeed())
+    package = {
+        "room_id": "room-1", "package_id": "shared-1", "package_mode": "shared_room",
+        "eligible_user_ids": [101, 303],
+    }
+    assert await service._recipient_ids(package) == [101, 303, 777, 999]
+
+
+def test_shared_room_status_explains_room_wide_contents_and_viewer_quota(tmp_path):
+    service = build_service(tmp_path)
+    from app.core.datetime import utcnow
+
+    text = service._status_text({
+        "state": "OPEN", "room_id": "room-1", "package_mode": "shared_room",
+        "created_at": utcnow(), "last_item_at": utcnow(), "item_count": 4,
+        "staged_count": 3, "pending_count": 1, "failed_count": 0,
+        "duplicate_count": 1, "reserved_bytes": 1024, "staged_bytes": 768,
+        "recent_video_count": 4,
+    })
+    assert "contenido único de todos los miembros" in text
+    assert "4/10" in text
+    assert "Te faltan" in text
+
+
+@pytest.mark.asyncio
+async def test_shared_package_waits_for_a_qualifying_member_before_finalizing(tmp_path, monkeypatch):
+    service = build_service(tmp_path)
+    package = {
+        "bot_id": 12345, "package_id": "shared-wait", "room_id": "room-1",
+        "package_mode": "shared_room", "state": "CLOSING", "close_reason": "size_limit",
+        "item_count": 1, "staged_count": 1, "pending_count": 0,
+        "staged_bytes": 100, "reserved_bytes": 100, "status_message_ids": {},
+    }
+
+    class FakeRepository:
+        def __init__(self):
+            self.doc = dict(package)
+
+        async def set_package_fields(self, bot_id, package_id, fields, expected_state=None):
+            if expected_state and self.doc.get("state") != expected_state:
+                return False
+            self.doc.update(fields)
+            return True
+
+        async def get_package(self, bot_id, package_id):
+            return dict(self.doc)
+
+        async def recent_user_video_counts(self, bot_id, room_id, since):
+            return {101: 9}
+
+    repo = FakeRepository()
+    service.repo = repo
+    service.ctx.repositories.packages = repo
+
+    async def no_progress(_package_id):
+        return None
+
+    monkeypatch.setattr(service, "schedule_progress_refresh", no_progress)
+    await service._finalize_package("shared-wait")
+
+    assert repo.doc["state"] == "WAITING_QUOTA"
+    assert "archive_path" not in repo.doc
+
+
+@pytest.mark.asyncio
+async def test_room_progress_cards_are_consolidated_into_the_current_shared_package(tmp_path):
+    service = build_service(tmp_path)
+    packages = {
+        "old": {"bot_id": 12345, "package_id": "old", "room_id": "room-1", "package_mode": "shared_room", "state": "WAITING_QUOTA", "status_message_ids": {"101": 200, "777": 201}},
+        "new": {"bot_id": 12345, "package_id": "new", "room_id": "room-1", "package_mode": "shared_room", "state": "OPEN", "status_message_ids": {"101": 300}},
+    }
+
+    class FakeRepository:
+        async def get_package(self, bot_id, package_id):
+            return dict(packages[package_id])
+
+        async def set_package_fields(self, bot_id, package_id, fields, expected_state=None):
+            packages[package_id].update(fields)
+            return True
+
+        async def list_active_room_packages(self, bot_id, room_id):
+            return [dict(p) for p in packages.values() if p["room_id"] == room_id and p["state"] in {"OPEN", "WAITING_QUOTA"}]
+
+    deleted = []
+
+    async def delete_message(**kwargs):
+        deleted.append(kwargs)
+
+    service.repo = FakeRepository()
+    service.ctx.repositories.packages = service.repo
+    service.ctx.bot.delete_message = delete_message
+
+    await service._consolidate_room_status_cards("room-1", "new")
+
+    assert packages["new"]["status_message_ids"] == {"101": 300, "777": 201}
+    assert packages["old"]["status_message_ids"] == {}
+    assert deleted == [{"chat_id": 101, "message_id": 200}]
+
+
+@pytest.mark.asyncio
 async def test_download_failure_is_recorded_without_masking_error_or_deleting_original(tmp_path, monkeypatch):
     service = build_service(tmp_path)
     item = {
@@ -249,7 +361,7 @@ async def _async_noop(*args, **kwargs):
 
 
 @pytest.mark.asyncio
-async def test_enqueue_creates_independent_packages_per_sender(tmp_path, monkeypatch):
+async def test_enqueue_accumulates_all_room_members_in_one_shared_package(tmp_path, monkeypatch):
     service = build_service(tmp_path)
 
     class FakeRepo:
@@ -261,12 +373,18 @@ async def test_enqueue_creates_independent_packages_per_sender(tmp_path, monkeyp
         async def get_item(self, bot_id, item_id):
             return self.items.get(item_id)
 
-        async def get_open_package(self, bot_id, room_id, sender_id):
-            return next((p for p in self.packages.values() if p["room_id"] == room_id and p["sender_id"] == sender_id and p["state"] == "OPEN"), None)
+        async def get_open_package(self, bot_id, room_id, sender_id=None):
+            return next((p for p in self.packages.values()
+                         if p["room_id"] == room_id and p.get("package_mode") == "shared_room"
+                         and p["state"] == "OPEN"), None)
 
-        async def create_package(self, bot_id, room_id, sender_id):
+        async def create_package(self, bot_id, room_id, sender_id=None):
             self.next_id += 1
-            package = {"bot_id": bot_id, "room_id": room_id, "sender_id": sender_id, "package_id": f"p{self.next_id}", "state": "OPEN", "item_count": 0, "pending_count": 0, "reserved_bytes": 0}
+            package = {
+                "bot_id": bot_id, "room_id": room_id, "package_mode": "shared_room",
+                "package_id": f"p{self.next_id}", "state": "OPEN", "item_count": 0,
+                "pending_count": 0, "reserved_bytes": 0, "status_message_ids": {},
+            }
             self.packages[package["package_id"]] = package
             return package
 
@@ -280,6 +398,16 @@ async def test_enqueue_creates_independent_packages_per_sender(tmp_path, monkeyp
 
         async def get_package(self, bot_id, package_id):
             return self.packages.get(package_id)
+
+        async def list_active_room_packages(self, bot_id, room_id):
+            return [p for p in self.packages.values() if p["room_id"] == room_id and p["state"] in {"OPEN", "CLOSING", "WAITING_QUOTA"}]
+
+        async def set_package_fields(self, bot_id, package_id, fields, expected_state=None):
+            package = self.packages.get(package_id)
+            if not package or (expected_state and package.get("state") != expected_state):
+                return False
+            package.update(fields)
+            return True
 
         async def close_package(self, *args, **kwargs):
             return None
@@ -300,14 +428,18 @@ async def test_enqueue_creates_independent_packages_per_sender(tmp_path, monkeyp
         )
 
     accepted_a, item_a, error_a = await service.enqueue(msg(101, 1), "room-1", "video", "file-a", 100, "a.mp4")
-    accepted_b, item_b, error_b = await service.enqueue(msg(202, 1), "room-1", "video", "file-b", 100, "b.mp4")
+    accepted_b, item_b, error_b = await service.enqueue(msg(202, 1), "room-1", "video", "file-b", 200, "b.mp4")
 
     assert accepted_a and accepted_b and not error_a and not error_b
     package_a = fake_repo.packages[fake_repo.items[item_a]["package_id"]]
     package_b = fake_repo.packages[fake_repo.items[item_b]["package_id"]]
-    assert package_a["sender_id"] == 101
-    assert package_b["sender_id"] == 202
-    assert package_a["package_id"] != package_b["package_id"]
+    assert package_a["package_id"] == package_b["package_id"]
+    assert package_a["package_mode"] == "shared_room"
+    assert "sender_id" not in package_a
+    assert fake_repo.items[item_a]["sender_id"] == 101
+    assert fake_repo.items[item_b]["sender_id"] == 202
+    assert package_a["item_count"] == 2
+
 
 
 def test_sha256_helper_detects_same_video_bytes(tmp_path):
@@ -462,3 +594,176 @@ async def test_final_archive_upload_targets_configured_channel_and_stores_source
     assert updated["delivery_source_chat_id"] == -100111
     assert updated["delivery_source_message_id"] == 987
     assert updated["channel_archive_kept"] is True
+
+
+@pytest.mark.asyncio
+async def test_legacy_user_package_migration_splits_room_shared_segments_at_size_limit(tmp_path, monkeypatch):
+    service = build_service(tmp_path)
+    service.max_bytes = 10
+    from app.core.datetime import utcnow
+    now = utcnow()
+    packages = {
+        "legacy-user": {
+            "bot_id": 12345, "package_id": "legacy-user", "room_id": "room-1",
+            "sender_id": 101, "package_mode": "legacy_per_user", "state": "OPEN",
+            "item_count": 2, "pending_count": 0, "staged_count": 2,
+            "reserved_bytes": 12, "staged_bytes": 12, "status_message_ids": {"101": 444},
+        }
+    }
+    items = {
+        "old-video-1": {"bot_id": 12345, "item_id": "old-video-1", "package_id": "legacy-user", "room_id": "room-1", "sender_id": 101, "media_type": "video", "status": "STAGED", "staged_size": 6, "expected_size": 6, "staged_path": str(tmp_path / "old1.mp4"), "created_at": now},
+        "old-video-2": {"bot_id": 12345, "item_id": "old-video-2", "package_id": "legacy-user", "room_id": "room-1", "sender_id": 101, "media_type": "video", "status": "STAGED", "staged_size": 6, "expected_size": 6, "staged_path": str(tmp_path / "old2.mp4"), "created_at": now + __import__("datetime").timedelta(seconds=1)},
+    }
+    counter = 0
+
+    class FakeRepository:
+        async def list_active_packages_for_migration(self, bot_id):
+            return [dict(packages["legacy-user"])]
+
+        async def list_migratable_items(self, bot_id, package_id):
+            return [dict(item) for item in items.values() if item["package_id"] == package_id and item["status"] in {"QUEUED", "DOWNLOADING", "STAGED", "STAGED_DELETE_PENDING"}]
+
+        async def get_open_package(self, bot_id, room_id, sender_id=None):
+            found = next((p for p in packages.values() if p.get("room_id") == room_id and p.get("package_mode") == "shared_room" and p.get("state") == "OPEN" and "sender_id" not in p), None)
+            return dict(found) if found else None
+
+        async def create_package(self, bot_id, room_id, sender_id=None):
+            nonlocal counter
+            counter += 1
+            package = {"bot_id": bot_id, "package_id": f"shared-{counter}", "room_id": room_id, "package_mode": "shared_room", "state": "OPEN", "created_at": now + __import__("datetime").timedelta(seconds=counter + 10), "last_item_at": now + __import__("datetime").timedelta(seconds=counter + 10), "item_count": 0, "pending_count": 0, "staged_count": 0, "failed_count": 0, "duplicate_count": 0, "reserved_bytes": 0, "staged_bytes": 0, "status_message_ids": {}, "delivery_user_ids": []}
+            packages[package["package_id"]] = package
+            return dict(package)
+
+        async def move_items_to_package(self, bot_id, source_package_id, target_package_id, item_ids=None):
+            ids = set(item_ids or [])
+            moved = 0
+            for item in items.values():
+                if item["package_id"] == source_package_id and (item_ids is None or item["item_id"] in ids):
+                    item["source_package_id"] = source_package_id
+                    item["package_id"] = target_package_id
+                    moved += 1
+            packages[target_package_id].setdefault("merged_legacy_package_ids", [])
+            if source_package_id not in packages[target_package_id]["merged_legacy_package_ids"]:
+                packages[target_package_id]["merged_legacy_package_ids"].append(source_package_id)
+            return moved
+
+        async def reconcile_package_counters(self, bot_id, package_id):
+            records = [it for it in items.values() if it["package_id"] == package_id]
+            pkg = packages[package_id]
+            pkg["item_count"] = len([it for it in records if it["status"] not in {"FAILED", "DUPLICATE"}])
+            pkg["pending_count"] = len([it for it in records if it["status"] in {"QUEUED", "DOWNLOADING"}])
+            pkg["staged_count"] = len([it for it in records if it["status"] in {"STAGED", "STAGED_DELETE_PENDING"}])
+            pkg["reserved_bytes"] = sum(int(it.get("staged_size", it.get("expected_size", 0)) or 0) for it in records if it["status"] not in {"FAILED", "DUPLICATE"})
+            pkg["staged_bytes"] = sum(int(it.get("staged_size", 0) or 0) for it in records if it["status"] in {"STAGED", "STAGED_DELETE_PENDING"})
+
+        async def close_package(self, bot_id, package_id, reason, eligible_user_ids=None):
+            packages[package_id]["state"] = "CLOSING"
+            packages[package_id]["close_reason"] = reason
+
+        async def get_package(self, bot_id, package_id):
+            item = packages.get(package_id)
+            return dict(item) if item else None
+
+        async def set_package_fields(self, bot_id, package_id, fields, expected_state=None):
+            package = packages.get(package_id)
+            if not package or (expected_state and package.get("state") != expected_state):
+                return False
+            package.update(fields)
+            return True
+
+        async def list_active_room_packages(self, bot_id, room_id):
+            return [dict(pkg) for pkg in packages.values() if pkg.get("room_id") == room_id and pkg.get("package_mode") == "shared_room" and pkg.get("state") in {"OPEN", "CLOSING", "WAITING_QUOTA", "PROCESSING", "DELIVERING", "SENT_WITH_ERRORS"}]
+
+    repo = FakeRepository()
+    service.repo = repo
+    service.ctx.repositories.packages = repo
+
+    async def no_progress(_package_id):
+        return None
+
+    monkeypatch.setattr(service, "schedule_progress_refresh", no_progress)
+    await service.migrate_legacy_packages()
+
+    segments = [p for p in packages.values() if p.get("package_mode") == "shared_room"]
+    assert len(segments) == 2
+    assert sorted(p["reserved_bytes"] for p in segments) == [6, 6]
+    assert all(p["reserved_bytes"] <= service.max_bytes for p in segments)
+    assert {items["old-video-1"]["package_id"], items["old-video-2"]["package_id"]} == {p["package_id"] for p in segments}
+    assert packages["legacy-user"]["state"] == "MIGRATED"
+    assert packages["shared-1"]["state"] == "CLOSING"
+    assert packages["shared-2"]["state"] == "OPEN"
+
+
+@pytest.mark.asyncio
+async def test_cleanup_status_messages_does_not_delete_card_already_moved_to_new_package(tmp_path):
+    service = build_service(tmp_path)
+    calls = []
+
+    class FakeRepository:
+        async def get_package(self, bot_id, package_id):
+            # The persisted old segment no longer owns the card; it was moved to the
+            # room's currently active shared package during size rollover.
+            return {"bot_id": bot_id, "package_id": package_id, "room_id": "room-1", "status_message_ids": {}}
+
+        async def set_package_fields(self, *args, **kwargs):
+            raise AssertionError("an empty status map should not need updating")
+
+    async def delete_message(**kwargs):
+        calls.append(kwargs)
+
+    service.repo = FakeRepository()
+    service.ctx.repositories.packages = service.repo
+    service.ctx.bot.delete_message = delete_message
+    await service._cleanup_status_messages({"package_id": "old", "room_id": "room-1", "status_message_ids": {"101": 987}})
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_cleanup_keeps_legacy_source_directory_while_another_segment_references_it(tmp_path):
+    service = build_service(tmp_path)
+    service.ctx.settings.telegram_api_timeout_seconds = 30
+    room_id = "room-1"
+    target_id = "shared-current"
+    legacy_id = "legacy-source"
+    target_dir = service._package_dir(room_id, target_id)
+    legacy_dir = service._package_dir(room_id, legacy_id)
+    target_dir.mkdir(parents=True)
+    legacy_dir.mkdir(parents=True)
+    (target_dir / "temporary.zip").write_bytes(b"zip")
+    legacy_file = legacy_dir / "staged.mp4"
+    legacy_file.write_bytes(b"old staged video")
+    package = {
+        "bot_id": 12345, "package_id": target_id, "room_id": room_id,
+        "package_mode": "shared_room", "state": "DELIVERING", "delivery_user_ids": [101],
+        "staged_count": 1, "archive_size": 3, "archive_path": str(target_dir / "temporary.zip"),
+        "password_encrypted": service.secret_box.encrypt("zip-pass"), "status_message_ids": {},
+        "delivery_source_chat_id": -100111, "delivery_source_message_id": 55,
+        "merged_legacy_package_ids": [legacy_id],
+    }
+
+    class FakeRepository:
+        def __init__(self): self.doc = dict(package); self.sent = set()
+        async def set_package_fields(self, bot_id, package_id, fields, expected_state=None):
+            if expected_state and self.doc.get("state") != expected_state: return False
+            self.doc.update(fields); return True
+        async def get_package(self, bot_id, package_id): return dict(self.doc)
+        async def get_delivery_source(self, bot_id, package_id): return (-100111, 55)
+        async def deliveries_for(self, bot_id, package_id): return set(self.sent)
+        async def mark_delivery(self, bot_id, package_id, user_id, status, error=None): self.sent.add(user_id)
+        async def list_failed_deliveries(self, bot_id, package_id): return []
+        async def has_active_package_reference_to_legacy_dir(self, bot_id, legacy_package_id, excluding_package_id): return True
+        async def expire_package_items_in(self, *args, **kwargs): return None
+        async def expire_deliveries_in(self, *args, **kwargs): return None
+
+    repo = FakeRepository()
+    service.repo = repo
+    service.ctx.repositories.packages = repo
+
+    async def copy_message(**kwargs): return None
+    service.ctx.bot.copy_message = copy_message
+    await service._finalize_package(target_id)
+
+    assert repo.doc["state"] == "SENT"
+    assert not target_dir.exists()
+    assert legacy_file.exists()
+    assert repo.doc["merged_legacy_package_ids"] == [legacy_id]

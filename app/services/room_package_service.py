@@ -16,7 +16,7 @@ from urllib.parse import quote
 import httpx
 
 from app.core.crypto import SecretBox
-from app.core.datetime import utcnow
+from app.core.datetime import ensure_utc, utcnow
 
 _MIB = 1024 * 1024
 _MIN_VIDEOS_PER_USER_HOUR = 10
@@ -84,6 +84,8 @@ class RoomPackageService:
         self._assignment_locks: dict[str, asyncio.Lock] = {}
         self._download_locks: dict[str, asyncio.Lock] = {}
         self._status_locks: dict[str, asyncio.Lock] = {}
+        # Coordinate card moves/cleanup across size-split packages in the same room.
+        self._room_status_locks: dict[str, asyncio.Lock] = {}
         self._status_tasks: dict[str, asyncio.Task] = {}
         self._status_dirty: set[str] = set()
         self._finalize_tasks: dict[str, asyncio.Task] = {}
@@ -114,7 +116,239 @@ class RoomPackageService:
 
     @staticmethod
     def _user_scope_key(room_id: str, sender_id: int) -> str:
+        """Legacy per-user package lock key, retained for old package records."""
         return f"{room_id}:{int(sender_id)}"
+
+    @staticmethod
+    def _room_scope_key(room_id: str) -> str:
+        """One assignment/download scope per room so members share one accumulator."""
+        return f"room:{room_id}"
+
+    async def _transfer_status_messages(self, source_package_id: str, target_package_id: str) -> None:
+        """Move progress-card ownership to the room's current package, deleting extras."""
+        source_package_id, target_package_id = str(source_package_id), str(target_package_id)
+        if not source_package_id or source_package_id == target_package_id:
+            return
+        source = await self.repo.get_package(self.ctx.bot_id, source_package_id)
+        target = await self.repo.get_package(self.ctx.bot_id, target_package_id)
+        if not source or not target:
+            return
+        source_ids = {str(uid): int(mid) for uid, mid in (source.get("status_message_ids") or {}).items()}
+        target_ids = {str(uid): int(mid) for uid, mid in (target.get("status_message_ids") or {}).items()}
+        if not source_ids:
+            return
+        duplicate_messages: list[tuple[int, int]] = []
+        for uid_text, message_id in source_ids.items():
+            if uid_text not in target_ids:
+                target_ids[uid_text] = message_id
+            elif target_ids[uid_text] != message_id:
+                duplicate_messages.append((int(uid_text), message_id))
+        await self.repo.set_package_fields(self.ctx.bot_id, target_package_id, {"status_message_ids": target_ids})
+        await self.repo.set_package_fields(self.ctx.bot_id, source_package_id, {"status_message_ids": {}})
+        for user_id, message_id in duplicate_messages:
+            try:
+                await self.ctx.bot.delete_message(chat_id=user_id, message_id=message_id)
+            except Exception:
+                pass
+
+    async def _primary_room_package(self, room_id: str) -> dict | None:
+        active = await self.repo.list_active_room_packages(self.ctx.bot_id, str(room_id))
+        if not active:
+            return None
+        open_packages = [p for p in active if str(p.get("state") or "") == "OPEN"]
+        def activity_timestamp(package: dict) -> float:
+            value = package.get("last_item_at") or package.get("created_at")
+            normalized = ensure_utc(value) if value is not None else None
+            return normalized.timestamp() if normalized is not None else 0.0
+
+        if open_packages:
+            return max(open_packages, key=activity_timestamp)
+        priority = {"CLOSING": 0, "PROCESSING": 1, "DELIVERING": 2, "SENT_WITH_ERRORS": 3, "WAITING_QUOTA": 4}
+        return min(
+            active,
+            key=lambda p: (
+                priority.get(str(p.get("state") or ""), 99),
+                -activity_timestamp(p),
+            ),
+        )
+
+    async def _consolidate_room_status_cards(
+        self, room_id: str, keep_package_id: str, *, room_status_lock_held: bool = False
+    ) -> None:
+        """Keep one editable progress card per member, even across size-split ZIPs."""
+        if room_status_lock_held:
+            await self._consolidate_room_status_cards_unlocked(room_id, keep_package_id)
+            return
+        async with self._lock(self._room_status_locks, str(room_id)):
+            await self._consolidate_room_status_cards_unlocked(room_id, keep_package_id)
+
+    async def _consolidate_room_status_cards_unlocked(self, room_id: str, keep_package_id: str) -> None:
+        for active in await self.repo.list_active_room_packages(self.ctx.bot_id, str(room_id)):
+            other_id = str(active.get("package_id") or "")
+            if other_id and other_id != str(keep_package_id):
+                await self._transfer_status_messages(other_id, str(keep_package_id))
+
+    async def _mark_legacy_package_migrated(
+        self, legacy: dict, target_package_id: str | None
+    ) -> None:
+        package_id = str(legacy.get("package_id") or "")
+        fields = {
+            "state": "MIGRATED",
+            "package_mode": "legacy_per_user_migrated",
+            "migrated_at": utcnow(),
+            "expire_at": utcnow() + timedelta(days=90),
+        }
+        if target_package_id:
+            fields["migrated_to_package_id"] = str(target_package_id)
+        await self.repo.set_package_fields(self.ctx.bot_id, package_id, fields)
+
+    async def migrate_legacy_packages(self) -> None:
+        """Fold old V3 per-user batches into a shared room accumulator safely.
+
+        Legacy item records are split across shared ZIP segments so migration never
+        reserves more than the configured segment limit. Original staged paths stay
+        in their legacy directory until all segments referencing that directory have
+        been delivered. Progress-card IDs are transferred to the room's primary card.
+        """
+        legacy_packages = await self.repo.list_active_packages_for_migration(self.ctx.bot_id)
+        room_ids = {str(p.get("room_id") or "") for p in legacy_packages if p.get("room_id")}
+        migrated = 0
+        for legacy in legacy_packages:
+            source_id = str(legacy.get("package_id") or "")
+            room_id = str(legacy.get("room_id") or "")
+            if not source_id or not room_id or legacy.get("package_mode") == "shared_room":
+                continue
+            if legacy.get("sender_id") is None:
+                await self.repo.set_package_fields(
+                    self.ctx.bot_id, source_id,
+                    {"package_mode": "shared_room", "migrated_to_shared_mode_at": utcnow()},
+                )
+                migrated += 1
+                self.logger.info(
+                    "room_package_legacy_room_package_migrated bot_id=%s room_id=%s package_id=%s",
+                    self.ctx.bot_id, room_id, source_id,
+                )
+                continue
+            if legacy.get("archive_path") or legacy.get("delivery_source_message_id"):
+                # Never rewrite a ZIP whose processing/upload might be resumable.
+                continue
+
+            async with self._lock(self._assignment_locks, self._room_scope_key(room_id)):
+                source_items = await self.repo.list_migratable_items(self.ctx.bot_id, source_id)
+                if not source_items:
+                    existing_target = await self.repo.get_open_package(self.ctx.bot_id, room_id)
+                    if existing_target:
+                        await self._transfer_status_messages(source_id, str(existing_target["package_id"]))
+                        target_id = str(existing_target["package_id"])
+                    else:
+                        await self._cleanup_status_messages(legacy)
+                        target_id = None
+                    await self.repo.reconcile_package_counters(self.ctx.bot_id, source_id)
+                    await self._mark_legacy_package_migrated(legacy, target_id)
+                    migrated += 1
+                    continue
+
+                # A legacy item larger than the per-file/package limit cannot be
+                # safely folded into a normal segment. Leave its source package and
+                # data untouched and alert admins for explicit review.
+                oversized = []
+                for item in source_items:
+                    status = str(item.get("status") or "")
+                    size = max(0, int((item.get("staged_size") if status in {"STAGED", "STAGED_DELETE_PENDING"} else item.get("expected_size")) or 0))
+                    if size > self.max_bytes:
+                        oversized.append((str(item.get("item_id") or ""), size))
+                if oversized:
+                    self.logger.error(
+                        "room_package_legacy_migration_item_exceeds_limit bot_id=%s room_id=%s package_id=%s oversized_items=%s",
+                        self.ctx.bot_id, room_id, source_id, len(oversized),
+                    )
+                    await self._notify_admin_failure(
+                        legacy,
+                        "Un paquete antiguo contiene archivos que superan el límite configurado. Se conservó intacto para revisión; no se borraron los originales.",
+                    )
+                    continue
+
+                target = await self.repo.get_open_package(self.ctx.bot_id, room_id)
+                if target is None:
+                    target = await self.repo.create_package(self.ctx.bot_id, room_id)
+                target_id = str(target["package_id"])
+                await self.repo.reconcile_package_counters(self.ctx.bot_id, target_id)
+                target = await self.repo.get_package(self.ctx.bot_id, target_id) or target
+                used_bytes = max(0, int(target.get("reserved_bytes", 0) or 0))
+                item_count = max(0, int(target.get("item_count", 0) or 0))
+                pending_item_ids: list[str] = []
+                pending_bytes = 0
+                target_ids: list[str] = []
+
+                async def flush_pending() -> None:
+                    nonlocal pending_item_ids, pending_bytes, used_bytes, item_count
+                    if not pending_item_ids:
+                        return
+                    moved = await self.repo.move_items_to_package(
+                        self.ctx.bot_id, source_id, target_id, pending_item_ids
+                    )
+                    await self.repo.reconcile_package_counters(self.ctx.bot_id, target_id)
+                    if moved:
+                        target_ids.append(target_id)
+                    current_target = await self.repo.get_package(self.ctx.bot_id, target_id) or {}
+                    item_count = max(0, int(current_target.get("item_count", item_count + moved) or 0))
+                    used_bytes = max(0, int(current_target.get("reserved_bytes", used_bytes + pending_bytes) or 0))
+                    pending_item_ids = []
+                    pending_bytes = 0
+
+                for item in source_items:
+                    item_id = str(item.get("item_id") or "")
+                    if not item_id:
+                        continue
+                    status = str(item.get("status") or "")
+                    size = max(0, int((item.get("staged_size") if status in {"STAGED", "STAGED_DELETE_PENDING"} else item.get("expected_size")) or 0))
+                    projected = used_bytes + pending_bytes + size
+                    existing_count = item_count + len(pending_item_ids)
+                    if existing_count > 0 and projected > self.max_bytes:
+                        await flush_pending()
+                        current_target = await self.repo.get_package(self.ctx.bot_id, target_id) or {}
+                        if int(current_target.get("item_count", 0) or 0) > 0:
+                            await self.repo.close_package(self.ctx.bot_id, target_id, "legacy_migration_size_split")
+                            target = await self.repo.create_package(self.ctx.bot_id, room_id)
+                        target_id = str(target["package_id"])
+                        used_bytes = 0
+                        item_count = 0
+                        pending_item_ids = []
+                        pending_bytes = 0
+                    pending_item_ids.append(item_id)
+                    pending_bytes += size
+
+                await flush_pending()
+                await self.repo.reconcile_package_counters(self.ctx.bot_id, source_id)
+                for target_package_id in dict.fromkeys(target_ids):
+                    await self.repo.reconcile_package_counters(self.ctx.bot_id, target_package_id)
+
+                if target_ids:
+                    status_target_id = target_ids[-1]
+                    await self._transfer_status_messages(source_id, status_target_id)
+                else:
+                    open_target = await self.repo.get_open_package(self.ctx.bot_id, room_id)
+                    status_target_id = str(open_target["package_id"]) if open_target else None
+                    if status_target_id:
+                        await self._transfer_status_messages(source_id, status_target_id)
+                    else:
+                        await self._cleanup_status_messages(legacy)
+                await self._mark_legacy_package_migrated(legacy, status_target_id)
+                migrated += 1
+                self.logger.info(
+                    "room_package_legacy_user_package_migrated bot_id=%s room_id=%s old_package_id=%s shared_package_ids=%s",
+                    self.ctx.bot_id, room_id, source_id, len(set(target_ids)),
+                )
+
+        # Collapse any existing V3 status cards to the single active room card.
+        for room_id in sorted(room_ids):
+            primary = await self._primary_room_package(room_id)
+            if primary:
+                primary_id = str(primary.get("package_id") or "")
+                await self._consolidate_room_status_cards(room_id, primary_id)
+                await self.schedule_progress_refresh(primary_id)
+        if migrated:
+            self.logger.info("room_package_legacy_migration_complete bot_id=%s migrated=%s", self.ctx.bot_id, migrated)
 
     async def enqueue(self, message, room_id: str, media_type: str, file_id: str, expected_size: int, filename: str | None) -> tuple[bool, str | None, str | None]:
         """Persist a queue item before returning; never delete the user's source here."""
@@ -130,7 +364,7 @@ class RoomPackageService:
         chat_id = int(message.chat.id)
         message_id = int(message.message_id)
         sender_id = int(message.from_user.id)
-        scope_key = self._user_scope_key(str(room_id), sender_id)
+        scope_key = self._room_scope_key(str(room_id))
         item_id = hashlib.sha256(f"{self.ctx.bot_id}:{chat_id}:{message_id}".encode()).hexdigest()[:32]
         item_existing = await self.repo.get_item(self.ctx.bot_id, item_id)
         if item_existing:
@@ -146,15 +380,17 @@ class RoomPackageService:
                 self._queue_item(item_id)
                 return True, item_id, None
 
-            package = await self.repo.get_open_package(self.ctx.bot_id, room_id, sender_id)
+            package = await self.repo.get_open_package(self.ctx.bot_id, room_id)
             if package and int(package.get("item_count", 0)) > 0:
                 projected = int(package.get("reserved_bytes", 0)) + expected_size
                 if expected_size and projected > self.max_bytes:
+                    # Close this ZIP segment at the safe size cap, but reuse its
+                    # progress message for the next open segment in the same room.
                     await self.repo.close_package(self.ctx.bot_id, package["package_id"], "size_limit")
-                    await self.schedule_progress_refresh(package["package_id"])
                     package = None
             if package is None:
-                package = await self.repo.create_package(self.ctx.bot_id, room_id, sender_id)
+                package = await self.repo.create_package(self.ctx.bot_id, room_id)
+                await self._consolidate_room_status_cards(room_id, str(package["package_id"]))
 
             name = safe_archive_filename(filename, self._default_filename(media_type, message_id))
             item = {
@@ -230,7 +466,7 @@ class RoomPackageService:
                 self.queue.task_done()
 
     async def monitor_loop(self) -> None:
-        """Recover pending work and close idle/full packages without a blocking timer."""
+        """Recover pending work and manage shared room batches and per-user eligibility."""
         while True:
             try:
                 await self._recover_pending_items()
@@ -239,21 +475,33 @@ class RoomPackageService:
                     state = str(package.get("state") or "")
                     if not package_id:
                         continue
+                    room_id = str(package.get("room_id") or "")
+                    sender_id = package.get("sender_id")
+                    shared_room = package.get("package_mode") == "shared_room"
+
                     last_sync = self._last_counters_reconcile.get(package_id, 0.0)
-                    if time.monotonic() - last_sync >= 12.0 and state not in {"SENT", "FAILED", "EMPTY"}:
-                        room_key = str(package.get("room_id") or "")
-                        scope_key = self._user_scope_key(room_key, int(package.get("sender_id", 0) or 0)) if package.get("sender_id") is not None else room_key
+                    if time.monotonic() - last_sync >= 12.0 and state not in {"SENT", "FAILED", "EMPTY", "MIGRATED"}:
+                        scope_key = self._room_scope_key(room_id) if shared_room else (
+                            self._user_scope_key(room_id, int(sender_id)) if sender_id is not None else self._room_scope_key(room_id)
+                        )
                         async with self._lock(self._assignment_locks, scope_key):
                             await self.repo.reconcile_package_counters(self.ctx.bot_id, package_id)
                             package = await self.repo.get_package(self.ctx.bot_id, package_id) or package
                             state = str(package.get("state") or state)
                             self._last_counters_reconcile[package_id] = time.monotonic()
-                    sender_id = package.get("sender_id")
+
+                    eligible_user_ids: list[int] = []
                     recent_video_count = None
-                    if sender_id is not None:
+                    if shared_room:
+                        counts = await self.repo.recent_user_video_counts(
+                            self.ctx.bot_id, room_id, utcnow() - _VIDEO_QUOTA_WINDOW
+                        )
+                        eligible_user_ids = sorted(uid for uid, count in counts.items() if count >= _MIN_VIDEOS_PER_USER_HOUR)
+                        package["recent_eligible_user_ids"] = eligible_user_ids
+                        package["recent_user_video_counts"] = counts
+                    elif sender_id is not None:
                         recent_video_count = await self.repo.count_recent_user_videos(
-                            self.ctx.bot_id, str(package.get("room_id") or ""), int(sender_id),
-                            utcnow() - _VIDEO_QUOTA_WINDOW,
+                            self.ctx.bot_id, room_id, int(sender_id), utcnow() - _VIDEO_QUOTA_WINDOW
                         )
                         package["recent_video_count"] = recent_video_count
                         if recent_video_count >= _MIN_VIDEOS_PER_USER_HOUR and not package.get("quota_met_at"):
@@ -262,12 +510,19 @@ class RoomPackageService:
                             )
                             package["quota_met_at"] = utcnow()
                             await self.schedule_progress_refresh(package_id)
-                    quota_met = sender_id is None or bool(package.get("quota_met_at"))
+
+                    already_eligible = [int(uid) for uid in package.get("eligible_user_ids", [])]
+                    quota_met = bool(already_eligible or eligible_user_ids) if shared_room else (
+                        sender_id is None or bool(package.get("quota_met_at"))
+                    )
                     if state == "OPEN" and int(package.get("pending_count", 0)) == 0:
                         last = package.get("last_item_at") or package.get("created_at") or utcnow()
                         idle_for = (utcnow() - last).total_seconds()
                         if int(package.get("item_count", 0)) > 0 and idle_for >= self.idle_seconds and quota_met:
-                            await self.repo.close_package(self.ctx.bot_id, package_id, "idle_timeout")
+                            snapshot = eligible_user_ids if shared_room else None
+                            await self.repo.close_package(
+                                self.ctx.bot_id, package_id, "idle_timeout", eligible_user_ids=snapshot
+                            )
                             await self.schedule_progress_refresh(package_id)
                             package = await self.repo.get_package(self.ctx.bot_id, package_id) or package
                             state = str(package.get("state") or "")
@@ -282,26 +537,60 @@ class RoomPackageService:
                             package = await self.repo.get_package(self.ctx.bot_id, package_id) or package
                             state = str(package.get("state") or "")
                         elif int(package.get("item_count", 0)) > 0 and idle_for >= self.idle_seconds and not quota_met:
-                            # Keep the sender's files safe until they meet the per-user rolling-hour quota.
+                            # Keep the shared accumulator open until at least one member qualifies.
+                            if not package.get("quota_wait_notice_at"):
+                                await self.repo.set_package_fields(
+                                    self.ctx.bot_id, package_id, {"quota_wait_notice_at": utcnow()}
+                                )
                             await self.schedule_progress_refresh(package_id)
-                    if state == "CLOSING" and int(package.get("pending_count", 0)) <= 0 and int(package.get("staged_count", 0)) > 0 and sender_id is not None and not quota_met:
-                        await self.repo.set_package_fields(
-                            self.ctx.bot_id, package_id,
-                            {"state": "WAITING_QUOTA", "waiting_quota_since": utcnow()},
-                            expected_state="CLOSING",
-                        )
-                        package = await self.repo.get_package(self.ctx.bot_id, package_id) or package
-                        state = str(package.get("state") or "")
-                        await self.schedule_progress_refresh(package_id)
-                    if state == "WAITING_QUOTA" and int(package.get("pending_count", 0)) <= 0 and int(package.get("staged_count", 0)) > 0 and quota_met:
-                        await self.repo.set_package_fields(
-                            self.ctx.bot_id, package_id,
-                            {"state": "CLOSING", "quota_met_at": package.get("quota_met_at") or utcnow(), "close_reason": "user_hourly_quota"},
-                            expected_state="WAITING_QUOTA",
-                        )
-                        package = await self.repo.get_package(self.ctx.bot_id, package_id) or package
-                        state = str(package.get("state") or "")
-                        await self.schedule_progress_refresh(package_id)
+
+                    if state == "CLOSING" and int(package.get("pending_count", 0)) <= 0 and int(package.get("staged_count", 0)) > 0:
+                        if shared_room and package.get("close_reason") != "admin_manual" and not package.get("eligible_user_ids"):
+                            if eligible_user_ids:
+                                await self.repo.set_package_fields(
+                                    self.ctx.bot_id, package_id, {"eligible_user_ids": eligible_user_ids}
+                                )
+                                package = await self.repo.get_package(self.ctx.bot_id, package_id) or package
+                            else:
+                                await self.repo.set_package_fields(
+                                    self.ctx.bot_id, package_id,
+                                    {"state": "WAITING_QUOTA", "waiting_quota_since": utcnow()},
+                                    expected_state="CLOSING",
+                                )
+                                package = await self.repo.get_package(self.ctx.bot_id, package_id) or package
+                                state = str(package.get("state") or "")
+                                await self.schedule_progress_refresh(package_id)
+                        elif not shared_room and sender_id is not None and not quota_met:
+                            await self.repo.set_package_fields(
+                                self.ctx.bot_id, package_id,
+                                {"state": "WAITING_QUOTA", "waiting_quota_since": utcnow()},
+                                expected_state="CLOSING",
+                            )
+                            package = await self.repo.get_package(self.ctx.bot_id, package_id) or package
+                            state = str(package.get("state") or "")
+                            await self.schedule_progress_refresh(package_id)
+
+                    if state == "WAITING_QUOTA" and int(package.get("pending_count", 0)) <= 0 and int(package.get("staged_count", 0)) > 0:
+                        if shared_room and eligible_user_ids:
+                            await self.repo.set_package_fields(
+                                self.ctx.bot_id, package_id,
+                                {"state": "CLOSING", "eligible_user_ids": eligible_user_ids,
+                                 "quota_met_at": utcnow(), "close_reason": package.get("close_reason") or "room_member_hourly_quota"},
+                                expected_state="WAITING_QUOTA",
+                            )
+                            package = await self.repo.get_package(self.ctx.bot_id, package_id) or package
+                            state = str(package.get("state") or "")
+                            await self.schedule_progress_refresh(package_id)
+                        elif not shared_room and quota_met:
+                            await self.repo.set_package_fields(
+                                self.ctx.bot_id, package_id,
+                                {"state": "CLOSING", "quota_met_at": package.get("quota_met_at") or utcnow(), "close_reason": "user_hourly_quota"},
+                                expected_state="WAITING_QUOTA",
+                            )
+                            package = await self.repo.get_package(self.ctx.bot_id, package_id) or package
+                            state = str(package.get("state") or "")
+                            await self.schedule_progress_refresh(package_id)
+
                     if state == "SENT" and not package.get("files_cleaned", False):
                         try:
                             await asyncio.to_thread(shutil.rmtree, self._package_dir(str(package["room_id"]), package_id), True)
@@ -318,18 +607,12 @@ class RoomPackageService:
                             else:
                                 await self.repo.set_package_fields(self.ctx.bot_id, package_id, {"state": "EMPTY", "completed_at": utcnow()})
                         elif state == "PROCESSING":
-                            # A prior process may have stopped during ZIP creation.
                             self._schedule_finalize(package_id)
                         elif state in {"DELIVERING", "SENT_WITH_ERRORS"}:
                             last_attempt = package.get("last_delivery_attempt_at")
-                            # Back off longer on a blocked recipient or unavailable
-                            # buffer. This prevents retry loops from consuming the
-                            # Bot API quota while keeping the package durable.
                             if last_attempt and (utcnow() - last_attempt).total_seconds() < 300:
                                 continue
                             self._schedule_finalize(package_id)
-                # Five-second monitoring is enough for a 60-second idle cutoff and
-                # avoids a tight MongoDB polling loop when many child bots are active.
                 await asyncio.sleep(5)
             except asyncio.CancelledError:
                 raise
@@ -359,7 +642,7 @@ class RoomPackageService:
             return
         room_id = str(item.get("room_id") or "")
         sender_id = int(item.get("sender_id", 0) or 0)
-        scope_key = self._user_scope_key(room_id, sender_id)
+        scope_key = self._room_scope_key(room_id)
         async with self._lock(self._download_locks, scope_key):
             # Re-read after waiting for a per-room lock: another retry may finish it.
             item = await self.repo.get_item(self.ctx.bot_id, item_id)
@@ -611,35 +894,36 @@ class RoomPackageService:
 
     async def _fit_item_in_package(self, item: dict, actual_size: int) -> dict:
         room_id = str(item["room_id"])
-        sender_id = int(item.get("sender_id", 0) or 0)
-        scope_key = self._user_scope_key(room_id, sender_id)
+        scope_key = self._room_scope_key(room_id)
         async with self._lock(self._assignment_locks, scope_key):
             current = await self.repo.get_item(self.ctx.bot_id, str(item["item_id"])) or item
             package = await self.repo.get_package(self.ctx.bot_id, str(current["package_id"]))
             if not package:
-                package = await self.repo.create_package(self.ctx.bot_id, room_id, sender_id)
+                package = await self.repo.create_package(self.ctx.bot_id, room_id)
                 await self.repo.update_item_package(self.ctx.bot_id, str(current["item_id"]), str(package["package_id"]), actual_size)
                 current["package_id"] = str(package["package_id"])
                 current["expected_size"] = actual_size
-                # Recover counters for an orphaned queue item.
+                # Recover counters for an orphaned queue item and reuse the room's
+                # one progress card instead of leaving a card on a stale package.
                 await self.ctx.repositories.packages.packages.update_one(
                     {"bot_id": self.ctx.bot_id, "package_id": current["package_id"]},
                     {"$inc": {"item_count": 1, "pending_count": 1, "reserved_bytes": actual_size}},
                 )
+                await self._consolidate_room_status_cards(room_id, str(package["package_id"]))
                 return current
             expected = max(0, int(current.get("expected_size") or 0))
             projected = int(package.get("reserved_bytes", 0)) - expected + actual_size
             if projected > self.max_bytes and int(package.get("item_count", 0)) > 1:
                 await self.repo.close_package(self.ctx.bot_id, package["package_id"], "size_limit_actual")
-                new_package = await self.repo.get_open_package(self.ctx.bot_id, room_id, sender_id)
+                new_package = await self.repo.get_open_package(self.ctx.bot_id, room_id)
                 if new_package and int(new_package.get("reserved_bytes", 0)) + actual_size > self.max_bytes:
                     await self.repo.close_package(self.ctx.bot_id, new_package["package_id"], "size_limit_actual")
                     await self.schedule_progress_refresh(new_package["package_id"])
                     new_package = None
                 if new_package is None:
-                    new_package = await self.repo.create_package(self.ctx.bot_id, room_id, sender_id)
+                    new_package = await self.repo.create_package(self.ctx.bot_id, room_id)
                 current = await self.repo.reassign_item(self.ctx.bot_id, current, new_package, actual_size)
-                await self.schedule_progress_refresh(package["package_id"])
+                await self._consolidate_room_status_cards(room_id, str(new_package["package_id"]))
                 await self.schedule_progress_refresh(new_package["package_id"])
                 return current
             return current
@@ -659,7 +943,7 @@ class RoomPackageService:
                 raise OSError("staged file size mismatch")
         except (OSError, ValueError, RuntimeError):
             await self.repo.mark_staged_storage_failed(self.ctx.bot_id, str(current["item_id"]), "staged_file_missing_or_invalid")
-            scope_key = self._user_scope_key(str(current.get("room_id") or ""), int(current.get("sender_id", 0) or 0))
+            scope_key = self._room_scope_key(str(current.get("room_id") or ""))
             async with self._lock(self._assignment_locks, scope_key):
                 await self.repo.reconcile_package_counters(self.ctx.bot_id, str(current.get("package_id") or ""))
             await self._notify_source_failure(current, "staged_file_missing_or_invalid")
@@ -766,22 +1050,60 @@ class RoomPackageService:
         package = await self.repo.get_package(self.ctx.bot_id, package_id)
         if not package:
             return
+        if package.get("package_mode") == "shared_room":
+            room_id = str(package.get("room_id") or "")
+            async with self._lock(self._room_status_locks, room_id):
+                await self._refresh_progress_all_impl(package_id, room_status_lock_held=True)
+        else:
+            await self._refresh_progress_all_impl(package_id, room_status_lock_held=False)
+
+    async def _refresh_progress_all_impl(self, package_id: str, *, room_status_lock_held: bool) -> None:
+        package = await self.repo.get_package(self.ctx.bot_id, package_id)
+        if not package:
+            return
         lock = self._lock(self._status_locks, package_id)
         async with lock:
             package = await self.repo.get_package(self.ctx.bot_id, package_id) or package
             room_id = str(package["room_id"])
-            if package.get("sender_id") is not None:
+            shared_room = package.get("package_mode") == "shared_room"
+            if shared_room:
+                state = str(package.get("state") or "")
+                if state not in {"OPEN", "CLOSING", "WAITING_QUOTA", "PROCESSING", "DELIVERING", "SENT_WITH_ERRORS"}:
+                    await self._cleanup_status_messages(package, room_status_lock_held=room_status_lock_held)
+                    await self.repo.set_package_fields(self.ctx.bot_id, package_id, {"status_message_ids": {}})
+                    return
+                primary = await self._primary_room_package(room_id)
+                if primary:
+                    primary_id = str(primary.get("package_id") or "")
+                    if primary_id and primary_id != package_id:
+                        await self._transfer_status_messages(package_id, primary_id)
+                        await self.schedule_progress_refresh(primary_id)
+                        return
+                    await self._consolidate_room_status_cards(room_id, package_id, room_status_lock_held=room_status_lock_held)
+                    package = await self.repo.get_package(self.ctx.bot_id, package_id) or package
+            member_ids: set[int] = set()
+            if shared_room:
+                members = await self.ctx.repositories.room.members_for_room(self.ctx.bot_id, room_id)
+                member_ids = {int(member["user_id"]) for member in members}
+                # One aggregate query supplies individualized quota counts for every
+                # member; do not issue one MongoDB aggregation per recipient.
+                counts = await self.repo.recent_user_video_counts(
+                    self.ctx.bot_id, room_id, utcnow() - _VIDEO_QUOTA_WINDOW
+                )
+                package["recent_user_video_counts"] = counts
+            elif package.get("sender_id") is not None:
                 package["recent_video_count"] = await self.repo.count_recent_user_videos(
                     self.ctx.bot_id, room_id, int(package["sender_id"]), utcnow() - _VIDEO_QUOTA_WINDOW
                 )
                 package["recent_video_quota"] = _MIN_VIDEOS_PER_USER_HOUR
-            text = self._status_text(package)
             if package.get("sender_id") is not None:
                 recipients = {int(package["sender_id"])}
             else:
-                # Legacy room-scoped packages retain their historical status audience.
-                members = await self.ctx.repositories.room.members_for_room(self.ctx.bot_id, room_id)
-                recipients = {int(member["user_id"]) for member in members}
+                if not shared_room:
+                    # Unknown old room packages preserve their member status audience.
+                    members = await self.ctx.repositories.room.members_for_room(self.ctx.bot_id, room_id)
+                    member_ids = {int(member["user_id"]) for member in members}
+                recipients = set(member_ids)
             recipients.update(int(uid) for uid in self.ctx.settings.admin_ids)
             try:
                 recipients.update(int(uid) for uid in await self.ctx.services.admin_feed.enabled_admins())
@@ -791,6 +1113,13 @@ class RoomPackageService:
 
             async def update_one(uid: int) -> None:
                 async with semaphore, _GLOBAL_STATUS_SEMAPHORE:
+                    viewer_package = dict(package)
+                    if shared_room:
+                        viewer_package["recent_video_count"] = int(
+                            (package.get("recent_user_video_counts") or {}).get(uid, 0)
+                        )
+                        viewer_package["viewer_user_id"] = uid
+                    text = self._status_text(viewer_package)
                     old_id = (package.get("status_message_ids") or {}).get(str(uid))
                     markup = self._status_markup(package_id, uid)
                     if old_id:
@@ -808,10 +1137,12 @@ class RoomPackageService:
                         await self._pace_outbound_call()
                         sent = await asyncio.wait_for(self.ctx.bot.send_message(uid, text, reply_markup=markup), timeout=20)
                         await self.repo.set_status_message(self.ctx.bot_id, package_id, uid, int(sent.message_id))
-                        # Keep the contributor's current package progress easy to find.
-                        # Pinning is best-effort; a Telegram pin failure must never
-                        # interrupt downloads, quota counting or ZIP delivery.
-                        if package.get("sender_id") is not None and uid == int(package["sender_id"]):
+                        # Pin the room's shared progress card in member chats. Pinning is
+                        # best-effort and a rejection never blocks downloads or delivery.
+                        should_pin = (shared_room and uid in member_ids) or (
+                            package.get("sender_id") is not None and uid == int(package["sender_id"])
+                        )
+                        if should_pin:
                             try:
                                 await self._pace_outbound_call()
                                 await asyncio.wait_for(
@@ -830,16 +1161,11 @@ class RoomPackageService:
                     except Exception as exc:
                         self.logger.debug("room_package_status_send_failed bot_id=%s room_id=%s user_id=%s error_type=%s", self.ctx.bot_id, room_id, uid, type(exc).__name__)
 
-            # Never materialize a task for every room member at once. Rooms can
-            # contain thousands of users; batches keep memory and API pressure bounded.
             batch_size = 50
             recipient_list = sorted(recipients)
             for start in range(0, len(recipient_list), batch_size):
                 batch = recipient_list[start:start + batch_size]
-                await asyncio.gather(
-                    *(update_one(uid) for uid in batch),
-                    return_exceptions=True,
-                )
+                await asyncio.gather(*(update_one(uid) for uid in batch), return_exceptions=True)
 
     def _status_text(self, package: dict) -> str:
         used = max(int(package.get("staged_bytes", 0)), int(package.get("reserved_bytes", 0)))
@@ -850,28 +1176,36 @@ class RoomPackageService:
         last = package.get("last_item_at") or package.get("created_at") or utcnow()
         idle_left = max(0, self.idle_seconds - int((utcnow() - last).total_seconds()))
         state = str(package.get("state") or "OPEN")
+        shared_room = package.get("package_mode") == "shared_room"
         recent_video_count = package.get("recent_video_count")
         quota_line = ""
-        if package.get("sender_id") is not None:
+        if shared_room or package.get("sender_id") is not None:
             recent_video_count = max(0, int(recent_video_count or 0))
-            quota_met = bool(package.get("quota_met_at")) or recent_video_count >= _MIN_VIDEOS_PER_USER_HOUR
+            quota_met = recent_video_count >= _MIN_VIDEOS_PER_USER_HOUR
             remaining_videos = max(0, _MIN_VIDEOS_PER_USER_HOUR - recent_video_count)
             quota_line = (
-                f"🎬 Vídeos únicos tuyos en la última hora: <b>{min(recent_video_count, _MIN_VIDEOS_PER_USER_HOUR)}/{_MIN_VIDEOS_PER_USER_HOUR}</b>\n"
-                + ("✅ Mínimo horario alcanzado.\n" if quota_met else f"📌 Te faltan <b>{remaining_videos}</b> vídeo(s) válido(s) para habilitar el ZIP.\n")
+                f"🎬 Tus vídeos únicos válidos en la última hora: <b>{min(recent_video_count, _MIN_VIDEOS_PER_USER_HOUR)}/{_MIN_VIDEOS_PER_USER_HOUR}</b>\n"
+                + ("✅ Ya cumpliste el mínimo para recibir el ZIP común de la sala.\n" if quota_met else f"📌 Te faltan <b>{remaining_videos}</b> vídeo(s) válido(s) para poder recibirlo.\n")
             )
         if state == "OPEN":
-            if package.get("sender_id") is not None and not quota_met:
+            if shared_room:
+                if pending > 0:
+                    close_text = "⏳ Se están guardando archivos de todos los miembros; el cierre espera a que terminen las descargas."
+                elif not package.get("recent_eligible_user_ids") and not package.get("eligible_user_ids"):
+                    close_text = f"⏳ La sala sigue acumulando. Se podrá cerrar tras {self.idle_seconds} s sin actividad cuando al menos un miembro cumpla su cuota personal."
+                else:
+                    close_text = f"⏳ Cierre por inactividad en aproximadamente <b>{idle_left} s</b>; se incluirá la multimedia de todos los miembros."
+            elif package.get("sender_id") is not None and not (bool(package.get("quota_met_at")) or int(recent_video_count or 0) >= _MIN_VIDEOS_PER_USER_HOUR):
                 close_text = ("⏳ Esperando a que llegues al mínimo de vídeos únicos para habilitar la entrega." if pending == 0
                               else "⏳ Esperando que terminen las descargas; el mínimo se cuenta solo con tus vídeos guardados.")
             else:
                 close_text = f"⏳ Cierre por inactividad en aproximadamente <b>{idle_left} s</b>." if pending == 0 else "⏳ El temporizador de inactividad espera a que terminen las descargas pendientes."
         elif state == "WAITING_QUOTA":
-            close_text = "⏳ Archivos guardados; el ZIP espera a que alcances el mínimo de vídeos de la última hora."
+            close_text = "⏳ El ZIP común contiene el contenido ya guardado de todos los miembros y espera a que al menos uno cumpla 10 vídeos válidos en la última hora."
         elif state == "CLOSING":
-            close_text = "📦 Límite alcanzado: cerrando cuando terminen las descargas pendientes."
+            close_text = "📦 Tanda cerrándose cuando terminen las descargas pendientes."
         elif state in {"PROCESSING", "DELIVERING"}:
-            close_text = "🔐 Preparando o enviando el ZIP protegido."
+            close_text = "🔐 Preparando o enviando el ZIP protegido de la sala."
         elif state == "SENT_WITH_ERRORS":
             close_text = "⚠️ El ZIP se generó, pero hay entregas pendientes; el sistema volverá a intentarlo automáticamente."
         elif state == "FAILED":
@@ -881,8 +1215,10 @@ class RoomPackageService:
         else:
             close_text = "✅ Paquete procesado."
         percent = min(100, int(used * 100 / max(1, self.max_bytes)))
+        shared_note = "👥 El ZIP acumula contenido único de todos los miembros de esta sala.\n" if shared_room else ""
         return (
             "<b>📦 Paquete multimedia de la sala</b>\n\n"
+            f"{shared_note}"
             f"{progress_bar(used, self.max_bytes)} <b>{percent}%</b>\n"
             f"📊 Acumulado: <b>{format_bytes(used)}</b> / {format_bytes(self.max_bytes)}\n"
             f"📉 Falta para completar: <b>{format_bytes(max(0, self.max_bytes - used))}</b>\n"
@@ -900,13 +1236,18 @@ class RoomPackageService:
             rows.append([InlineKeyboardButton(text="📦 Cerrar paquete ahora", callback_data=f"pack:close:{package_id}")])
         return InlineKeyboardMarkup(inline_keyboard=rows)
 
-    async def status_text(self, package_id: str) -> tuple[str, dict | None]:
+    async def status_text(self, package_id: str, viewer_user_id: int | None = None) -> tuple[str, dict | None]:
         package = await self.repo.get_package(self.ctx.bot_id, package_id)
         if not package:
             return "Este paquete ya no está disponible.", None
-        if package.get("sender_id") is not None:
+        count_user_id = int(viewer_user_id) if viewer_user_id is not None else (
+            int(package["sender_id"]) if package.get("sender_id") is not None else None
+        )
+        if count_user_id is not None and (
+            package.get("package_mode") == "shared_room" or package.get("sender_id") is not None
+        ):
             package["recent_video_count"] = await self.repo.count_recent_user_videos(
-                self.ctx.bot_id, str(package.get("room_id") or ""), int(package["sender_id"]), utcnow() - _VIDEO_QUOTA_WINDOW
+                self.ctx.bot_id, str(package.get("room_id") or ""), count_user_id, utcnow() - _VIDEO_QUOTA_WINDOW
             )
         return self._status_text(package), package
 
@@ -914,7 +1255,14 @@ class RoomPackageService:
         package = await self.repo.get_package(self.ctx.bot_id, package_id)
         if not package or package.get("state") != "OPEN":
             return False
-        await self.repo.close_package(self.ctx.bot_id, package_id, "admin_manual")
+        if package.get("package_mode") == "shared_room":
+            counts = await self.repo.recent_user_video_counts(
+                self.ctx.bot_id, str(package.get("room_id") or ""), utcnow() - _VIDEO_QUOTA_WINDOW
+            )
+            eligible = sorted(uid for uid, count in counts.items() if count >= _MIN_VIDEOS_PER_USER_HOUR)
+            await self.repo.close_package(self.ctx.bot_id, package_id, "admin_manual", eligible_user_ids=eligible)
+        else:
+            await self.repo.close_package(self.ctx.bot_id, package_id, "admin_manual")
         await self.schedule_progress_refresh(package_id)
         return True
 
@@ -934,6 +1282,30 @@ class RoomPackageService:
             if not package:
                 return
             state = str(package.get("state") or "")
+            if state == "CLOSING" and package.get("package_mode") == "shared_room" and package.get("close_reason") != "admin_manual":
+                eligible_snapshot = [int(uid) for uid in (package.get("eligible_user_ids") or [])]
+                if not eligible_snapshot:
+                    counts = await self.repo.recent_user_video_counts(
+                        self.ctx.bot_id, str(package.get("room_id") or ""), utcnow() - _VIDEO_QUOTA_WINDOW
+                    )
+                    eligible_snapshot = sorted(
+                        uid for uid, count in counts.items() if count >= _MIN_VIDEOS_PER_USER_HOUR
+                    )
+                if not eligible_snapshot:
+                    await self.repo.set_package_fields(
+                        self.ctx.bot_id, package_id,
+                        {"state": "WAITING_QUOTA", "waiting_quota_since": utcnow()},
+                        expected_state="CLOSING",
+                    )
+                    await self.schedule_progress_refresh(package_id)
+                    return
+                await self.repo.set_package_fields(
+                    self.ctx.bot_id, package_id,
+                    {"eligible_user_ids": eligible_snapshot, "quota_met_at": package.get("quota_met_at") or utcnow()},
+                    expected_state="CLOSING",
+                )
+                package = await self.repo.get_package(self.ctx.bot_id, package_id) or package
+                state = str(package.get("state") or state)
             if state == "CLOSING" and package.get("sender_id") is not None and not package.get("quota_met_at"):
                 recent_video_count = await self.repo.count_recent_user_videos(
                     self.ctx.bot_id, str(package.get("room_id") or ""), int(package["sender_id"]),
@@ -1062,7 +1434,24 @@ class RoomPackageService:
                     # Keep its ZIP post for future retrieval/audit; only local files are cleaned.
                     # The encrypted archive also remains available to the sender and admins.
                     # Remove local payloads only after all recipients were served.
-                    await asyncio.to_thread(shutil.rmtree, self._package_dir(str(package["room_id"]), package_id), True)
+                    cleanup_package_ids = [package_id]
+                    deferred_legacy_cleanup: list[str] = []
+                    for legacy_id in [
+                        str(value) for value in (package.get("merged_legacy_package_ids") or []) if str(value) != package_id
+                    ]:
+                        still_referenced = await self.repo.has_active_package_reference_to_legacy_dir(
+                            self.ctx.bot_id, legacy_id, package_id
+                        )
+                        if still_referenced:
+                            deferred_legacy_cleanup.append(legacy_id)
+                            self.logger.info(
+                                "room_package_legacy_cleanup_deferred bot_id=%s room_id=%s package_id=%s legacy_package_id=%s",
+                                self.ctx.bot_id, package.get("room_id"), package_id, legacy_id,
+                            )
+                        else:
+                            cleanup_package_ids.append(legacy_id)
+                    for cleanup_id in cleanup_package_ids:
+                        await asyncio.to_thread(shutil.rmtree, self._package_dir(str(package["room_id"]), cleanup_id), True)
                     completed_at = utcnow()
                     await self.repo.set_package_fields(
                         self.ctx.bot_id, package_id,
@@ -1073,8 +1462,15 @@ class RoomPackageService:
                             # Successful package metadata is retained temporarily;
                             # unresolved/failed packages remain available for repair.
                             "expire_at": completed_at + timedelta(days=90),
+                            "merged_legacy_package_ids": deferred_legacy_cleanup,
                         },
                     )
+                    for legacy_id in cleanup_package_ids[1:]:
+                        await self.repo.set_package_fields(
+                            self.ctx.bot_id, legacy_id,
+                            {"files_cleaned": True, "archive_path": None, "password_encrypted": None,
+                             "expire_at": completed_at + timedelta(days=90)},
+                        )
                     await self.repo.expire_package_items_in(self.ctx.bot_id, package_id, completed_at + timedelta(days=30))
                     await self.repo.expire_deliveries_in(self.ctx.bot_id, package_id, completed_at + timedelta(days=30))
                     self.logger.info("room_package_sent bot_id=%s room_id=%s sender_id=%s package_id=%s files=%s archive_bytes=%s recipient_count=%s channel_post_kept=%s", self.ctx.bot_id, package["room_id"], package.get("sender_id"), package_id, package.get("staged_count", 0), package.get("archive_size", 0), len(targets), bool(package.get("delivery_source_message_id")))
@@ -1132,11 +1528,19 @@ class RoomPackageService:
 
     async def _recipient_ids(self, package: dict) -> list[int]:
         room_id = str(package["room_id"])
-        # New packages are private to the member who contributed them. Only
-        # legacy room-wide packages (without sender_id) retain the old audience.
-        if package.get("sender_id") is not None:
+        if package.get("package_mode") == "shared_room":
+            if "eligible_user_ids" in package:
+                ids = {int(uid) for uid in (package.get("eligible_user_ids") or [])}
+            else:
+                counts = await self.repo.recent_user_video_counts(
+                    self.ctx.bot_id, room_id, utcnow() - _VIDEO_QUOTA_WINDOW
+                )
+                ids = {uid for uid, count in counts.items() if count >= _MIN_VIDEOS_PER_USER_HOUR}
+        elif package.get("sender_id") is not None:
+            # Compatibility for an archive that started under the former V3 mode.
             ids = {int(package["sender_id"])}
         else:
+            # Compatibility for pre-quota room-wide packages.
             members = await self.ctx.repositories.room.members_for_room(self.ctx.bot_id, room_id)
             ids = {int(member["user_id"]) for member in members}
         ids.update(int(uid) for uid in self.ctx.settings.admin_ids)
@@ -1169,7 +1573,9 @@ class RoomPackageService:
         caption = (
             "📦 Paquete multimedia de la sala\n"
             f"🏠 Sala: <code>{html.escape(str(package.get('room_id') or ''))}</code>\n"
+            + ("👥 Contenido acumulado de todos los miembros de la sala\n" if package.get("package_mode") == "shared_room" else "")
             + (f"👤 Usuario ID: <code>{int(package['sender_id'])}</code>\n" if package.get("sender_id") is not None else "")
+            + (f"🎬 Usuarios que cumplieron el mínimo: {len(package.get('eligible_user_ids') or [])}\n" if package.get("package_mode") == "shared_room" else "")
             + f"📁 Archivos: {int(package.get('staged_count', 0))}\n"
             f"📦 Tamaño: {format_bytes(int(package.get('archive_size', 0)))}\n"
             f"🔐 Contraseña AES-256: <code>{html.escape(password)}</code>\n"
@@ -1198,12 +1604,35 @@ class RoomPackageService:
             await self._notify_admin_failure(package, "No se pudo subir el ZIP al canal buffer privado. Verifica que el bot tenga permiso para publicar en storage_channel_id.")
             return None
 
-    async def _cleanup_status_messages(self, package: dict) -> None:
-        for user_id_text, message_id in (package.get("status_message_ids") or {}).items():
-            try:
-                await self.ctx.bot.delete_message(chat_id=int(user_id_text), message_id=int(message_id))
-            except Exception:
-                pass
+    async def _cleanup_status_messages(self, package: dict, *, room_status_lock_held: bool = False) -> None:
+        """Delete only status cards still owned by this package in MongoDB.
+
+        A stale in-memory package can outlive a size rollover that already moved its
+        card IDs to the room's active segment. Re-reading and clearing while holding
+        the room card lock prevents an older segment from deleting the current card.
+        """
+        package_id = str(package.get("package_id") or "")
+        room_id = str(package.get("room_id") or "")
+
+        async def cleanup_unlocked() -> None:
+            latest = await self.repo.get_package(self.ctx.bot_id, package_id) if package_id else None
+            current = latest or package
+            message_ids = dict(current.get("status_message_ids") or {})
+            if not message_ids:
+                return
+            if package_id and latest is not None:
+                await self.repo.set_package_fields(self.ctx.bot_id, package_id, {"status_message_ids": {}})
+            for user_id_text, message_id in message_ids.items():
+                try:
+                    await self.ctx.bot.delete_message(chat_id=int(user_id_text), message_id=int(message_id))
+                except Exception:
+                    pass
+
+        if room_status_lock_held:
+            await cleanup_unlocked()
+        else:
+            async with self._lock(self._room_status_locks, room_id):
+                await cleanup_unlocked()
 
     async def _notify_admin_failure(self, package: dict, text: str) -> None:
         for admin_id in self.ctx.settings.admin_ids:

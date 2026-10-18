@@ -16,11 +16,101 @@ class RoomPackageRepository:
 
     async def get_open_package(self, bot_id: int, room_id: str, sender_id: int | None = None) -> dict | None:
         query = {"bot_id": int(bot_id), "room_id": str(room_id), "state": "OPEN"}
-        # New packages are isolated per sender. Omitting sender_id remains available
-        # for legacy administrative tooling, but new intake always supplies it.
         if sender_id is not None:
+            # Compatibility lookup for old V3 packages only. New ingestion always
+            # requests the shared room package without sender_id.
             query["sender_id"] = int(sender_id)
+        else:
+            query["package_mode"] = "shared_room"
+            query["sender_id"] = {"$exists": False}
         return await self.packages.find_one(query, {"_id": 0})
+
+    async def list_active_packages_for_migration(self, bot_id: int) -> list[dict]:
+        """List pre-shared-mode packages that can safely be folded into room batches.
+
+        Only active packages without an uploaded archive are eligible. Processing or
+        delivering archives are deliberately left untouched so an interrupted delivery
+        is never rewritten underneath its worker.
+        """
+        return await self.packages.find(
+            {
+                "bot_id": int(bot_id),
+                "state": {"$in": ["OPEN", "WAITING_QUOTA", "CLOSING"]},
+                "delivery_source_message_id": {"$exists": False},
+            },
+            {"_id": 0},
+        ).sort("created_at", 1).to_list(length=None)
+
+    async def list_active_room_packages(self, bot_id: int, room_id: str) -> list[dict]:
+        """Return active shared batches for one room, oldest activity first.
+
+        A room may have a closing/waiting segment after hitting the ZIP size cap,
+        while a newer OPEN segment accepts incoming files. The service consolidates
+        progress-card IDs so members still see a single card for the room.
+        """
+        return await self.packages.find(
+            {
+                "bot_id": int(bot_id),
+                "room_id": str(room_id),
+                "package_mode": "shared_room",
+                "sender_id": {"$exists": False},
+                "state": {"$in": ["OPEN", "CLOSING", "WAITING_QUOTA", "PROCESSING", "DELIVERING", "SENT_WITH_ERRORS"]},
+            },
+            {"_id": 0},
+        ).sort([("last_item_at", 1), ("created_at", 1)]).to_list(length=None)
+
+    async def list_migratable_items(self, bot_id: int, package_id: str) -> list[dict]:
+        """List durable or pending source records from a legacy package in order."""
+        return await self.items.find(
+            {
+                "bot_id": int(bot_id), "package_id": str(package_id),
+                "status": {"$in": ["QUEUED", "DOWNLOADING", "STAGED", "STAGED_DELETE_PENDING"]},
+            },
+            {"_id": 0},
+        ).sort("created_at", 1).to_list(length=None)
+
+    async def move_items_to_package(
+        self, bot_id: int, source_package_id: str, target_package_id: str,
+        item_ids: list[str] | None = None,
+    ) -> int:
+        """Move selected legacy records into a room-shared package segment."""
+        now = utcnow()
+        query = {"bot_id": int(bot_id), "package_id": str(source_package_id)}
+        if item_ids is not None:
+            if not item_ids:
+                return 0
+            query["item_id"] = {"$in": [str(item_id) for item_id in item_ids]}
+        result = await self.items.update_many(
+            query,
+            {"$set": {
+                "source_package_id": str(source_package_id),
+                "package_id": str(target_package_id),
+                "updated_at": now,
+            }},
+        )
+        await self.packages.update_one(
+            {"bot_id": int(bot_id), "package_id": str(target_package_id)},
+            {
+                "$addToSet": {"merged_legacy_package_ids": str(source_package_id)},
+                "$set": {"last_item_at": now, "updated_at": now},
+            },
+        )
+        return int(result.modified_count)
+
+    async def has_active_package_reference_to_legacy_dir(
+        self, bot_id: int, legacy_package_id: str, excluding_package_id: str
+    ) -> bool:
+        """Keep a legacy staging directory until every split package used by it is done."""
+        doc = await self.packages.find_one(
+            {
+                "bot_id": int(bot_id),
+                "package_id": {"$ne": str(excluding_package_id)},
+                "merged_legacy_package_ids": str(legacy_package_id),
+                "state": {"$nin": ["SENT", "FAILED", "EMPTY", "MIGRATED"]},
+            },
+            {"_id": 1},
+        )
+        return bool(doc)
 
     async def get_package(self, bot_id: int, package_id: str) -> dict | None:
         return await self.packages.find_one(
@@ -36,6 +126,7 @@ class RoomPackageRepository:
                 "bot_id": int(bot_id),
                 "room_id": str(room_id),
                 **({"sender_id": int(sender_id)} if sender_id is not None else {}),
+                "package_mode": "legacy_per_user" if sender_id is not None else "shared_room",
                 "package_id": package_id,
                 "state": "OPEN",
                 "created_at": now,
@@ -160,9 +251,11 @@ class RoomPackageRepository:
         return updated
 
     async def find_staged_duplicate(self, bot_id: int, room_id: str, sender_id: int, content_sha256: str) -> dict | None:
+        # Duplicate video detection is room-wide, not sender-specific: identical
+        # bytes from any member belong in the shared room ZIP only once.
         return await self.items.find_one(
             {
-                "bot_id": int(bot_id), "room_id": str(room_id), "sender_id": int(sender_id),
+                "bot_id": int(bot_id), "room_id": str(room_id),
                 "media_type": "video", "content_sha256": str(content_sha256),
                 "status": {"$in": ["STAGED", "STAGED_DELETE_PENDING"]},
             },
@@ -203,11 +296,35 @@ class RoomPackageRepository:
         )
 
     async def count_recent_user_videos(self, bot_id: int, room_id: str, sender_id: int, since) -> int:
-        return int(await self.items.count_documents({
-            "bot_id": int(bot_id), "room_id": str(room_id), "sender_id": int(sender_id),
-            "media_type": "video", "status": {"$in": ["STAGED", "STAGED_DELETE_PENDING"]},
-            "staged_at": {"$gte": since}, "content_sha256": {"$type": "string"},
-        }))
+        """Count distinct, successfully staged video hashes for one member in the last hour."""
+        pipeline = [
+            {"$match": {
+                "bot_id": int(bot_id), "room_id": str(room_id), "sender_id": int(sender_id),
+                "media_type": "video", "status": {"$in": ["STAGED", "STAGED_DELETE_PENDING"]},
+                "staged_at": {"$gte": since}, "content_sha256": {"$type": "string"},
+            }},
+            {"$group": {"_id": "$content_sha256"}},
+            {"$group": {"_id": None, "video_count": {"$sum": 1}}},
+        ]
+        cursor = await self.items.aggregate(pipeline)
+        rows = await cursor.to_list(length=1)
+        return int(rows[0].get("video_count", 0) or 0) if rows else 0
+
+    async def recent_user_video_counts(self, bot_id: int, room_id: str, since) -> dict[int, int]:
+        """Count distinct valid video hashes per sender over a rolling time window."""
+        pipeline = [
+            {"$match": {
+                "bot_id": int(bot_id), "room_id": str(room_id), "media_type": "video",
+                "status": {"$in": ["STAGED", "STAGED_DELETE_PENDING"]},
+                "staged_at": {"$gte": since}, "content_sha256": {"$type": "string"},
+                "sender_id": {"$type": "number"},
+            }},
+            {"$group": {"_id": {"sender_id": "$sender_id", "content_sha256": "$content_sha256"}}},
+            {"$group": {"_id": "$_id.sender_id", "video_count": {"$sum": 1}}},
+        ]
+        cursor = await self.items.aggregate(pipeline)
+        rows = await cursor.to_list(length=None)
+        return {int(row["_id"]): int(row["video_count"]) for row in rows if row.get("_id") is not None}
 
     async def mark_staged(self, bot_id: int, item: dict, path: str, actual_size: int, content_sha256: str | None = None) -> bool:
         expected = max(0, int(item.get("expected_size") or 0))
@@ -279,10 +396,15 @@ class RoomPackageRepository:
         }
         return await self.packages.find(query, {"_id": 0}).sort("updated_at", 1).limit(limit).to_list(length=limit)
 
-    async def close_package(self, bot_id: int, package_id: str, reason: str) -> None:
+    async def close_package(
+        self, bot_id: int, package_id: str, reason: str, *, eligible_user_ids: list[int] | None = None
+    ) -> None:
+        fields = {"state": "CLOSING", "close_reason": str(reason), "closed_at": utcnow(), "updated_at": utcnow()}
+        if eligible_user_ids is not None:
+            fields["eligible_user_ids"] = sorted({int(uid) for uid in eligible_user_ids})
         await self.packages.update_one(
             {"bot_id": int(bot_id), "package_id": str(package_id), "state": "OPEN"},
-            {"$set": {"state": "CLOSING", "close_reason": str(reason), "closed_at": utcnow(), "updated_at": utcnow()}},
+            {"$set": fields},
         )
 
     async def expire_package_items_in(self, bot_id: int, package_id: str, expire_at) -> None:
