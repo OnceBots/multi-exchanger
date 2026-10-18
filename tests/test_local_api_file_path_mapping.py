@@ -145,3 +145,55 @@ def test_relative_get_file_path_maps_full_token_directory(tmp_path):
     settings = make_settings(server_root, host_root)
 
     assert map_api_file_path(settings, "videos/file_6.mp4", bot_token=token) == expected
+
+def test_absolute_path_accepts_rotated_token_directory_for_same_bot(tmp_path):
+    server_root = tmp_path / "container" / "var" / "lib" / "telegram-bot-api"
+    host_root = tmp_path / "host" / "tg-bot-api" / "data"
+    active_token = "123456:NEW_TOKEN"
+    stored_token = "123456:OLD_TOKEN"
+    expected = make_file(host_root / stored_token / "videos" / "file_6.mp4", b"video")
+    settings = make_settings(server_root, host_root)
+
+    assert map_api_file_path(
+        settings,
+        server_root / stored_token / "videos" / "file_6.mp4",
+        bot_token=active_token,
+    ) == expected
+
+
+def test_relative_path_searches_unique_same_bot_directory_after_token_rotation(tmp_path):
+    server_root = tmp_path / "container" / "var" / "lib" / "telegram-bot-api"
+    host_root = tmp_path / "host" / "tg-bot-api" / "data"
+    active_token = "123456:NEW_TOKEN"
+    stored_token = "123456:OLD_TOKEN"
+    expected = make_file(host_root / stored_token / "videos" / "file_6.mp4", b"video")
+    settings = make_settings(server_root, host_root)
+
+    assert map_api_file_path(
+        settings, "videos/file_6.mp4", bot_token=active_token
+    ) == expected
+
+
+def test_absolute_host_style_path_maps_by_bot_directory_without_exposing_root(tmp_path):
+    server_root = tmp_path / "container" / "var" / "lib" / "telegram-bot-api"
+    host_root = tmp_path / "host" / "tg-bot-api" / "data"
+    active_token = "123456:NEW_TOKEN"
+    stored_token = "123456:OLD_TOKEN"
+    expected = make_file(host_root / stored_token / "videos" / "file_6.mp4", b"video")
+    settings = make_settings(server_root, host_root)
+    reported = tmp_path / "old-host-root" / "data" / stored_token / "videos" / "file_6.mp4"
+
+    assert map_api_file_path(settings, reported, bot_token=active_token) == expected
+
+
+def test_rejects_ambiguous_relative_file_across_same_bot_token_directories(tmp_path):
+    server_root = tmp_path / "container" / "var" / "lib" / "telegram-bot-api"
+    host_root = tmp_path / "host" / "tg-bot-api" / "data"
+    token = "123456:ACTIVE_TOKEN"
+    make_file(host_root / "123456:OLD_TOKEN" / "videos" / "file_6.mp4", b"old")
+    make_file(host_root / token / "videos" / "file_6.mp4", b"new")
+    settings = make_settings(server_root, host_root)
+
+    with pytest.raises(FileNotFoundError, match="varios archivos"):
+        map_api_file_path(settings, "videos/file_6.mp4", bot_token=token)
+

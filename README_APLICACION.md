@@ -2,7 +2,7 @@
 
 La corrección está integrada en el código de este proyecto. **No ejecutes el instalador histórico** `apply_local_api_path_fix.py`: quedó deshabilitado porque podía restaurar valores de rutas incompatibles.
 
-Consulta `PATCH_MANIFEST_LOCAL_API_PATHS_V4.md` para la causa verificada, los cambios y las validaciones.
+Consulta `PATCH_MANIFEST_LOCAL_API_PATHS_V5.md` para la causa verificada, los cambios y las validaciones.
 
 ## Rutas correctas en Vultr
 

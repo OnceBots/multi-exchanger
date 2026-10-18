@@ -36,24 +36,49 @@ def _is_within(path: Path, root: Path) -> bool:
     return True
 
 
+def _bot_directory_names(host_root: Path, bot_id: str, bot_dirs: tuple[str, ...]) -> tuple[str, ...]:
+    """List on-disk directories owned by this bot ID, including rotated tokens.
+
+    Local Bot API data can retain a directory named ``<id>:<old-token>`` after
+    the bot token has been rotated. We only accept directories whose prefix is
+    this bot's numeric ID; directories belonging to other bots are never used.
+    """
+    names = list(bot_dirs)
+    try:
+        for child in host_root.iterdir():
+            if child.is_dir() and (child.name == bot_id or child.name.startswith(f"{bot_id}:")):
+                if child.name not in names:
+                    names.append(child.name)
+    except OSError:
+        # Candidate checks below will produce a safe, generic diagnostic.
+        pass
+    return tuple(names)
+
+
+def _is_our_bot_directory(name: str, *, bot_id: str, bot_dirs: tuple[str, ...]) -> bool:
+    return name in bot_dirs or name == bot_id or name.startswith(f"{bot_id}:")
+
+
 def map_api_file_path(
     settings,
     server_file_path: str | Path,
     *,
     bot_token: str | None = None,
 ) -> Path:
-    """Map local Bot API paths to this bot's file in the shared host volume.
+    """Map a local Bot API file path into the app's read-only shared volume.
 
-    Supports absolute paths rooted in the Bot API container, paths already
-    under the app's shared mount, and relative paths. It accepts both known
-    directory layouts (full bot token or numeric bot ID), validates that the
-    final existing file remains under this bot's directory, and never places
-    the token in logs or error messages.
+    Handles container-absolute paths, host-volume paths, relative paths, and
+    Bot API directories retained after token rotation. Resolution is strictly
+    scoped to folders belonging to the numeric bot ID and rejects traversal or
+    ambiguous relative matches so one bot cannot receive another bot's media.
     """
     if not settings.telegram_api_local_mode:
         raise RuntimeError("El mapeo local requiere TELEGRAM_API_LOCAL_MODE=true.")
 
     bot_dirs = _bot_directories_from_token(bot_token)
+    if not bot_dirs:
+        raise ValueError("No se puede resolver una ruta local sin el token del bot.")
+    bot_id = bot_dirs[-1] if bot_dirs[-1].isdigit() else bot_dirs[0].split(":", 1)[0]
     server_root = Path(settings.telegram_api_server_files_root).expanduser().resolve()
     host_root = Path(settings.telegram_api_host_files_root).expanduser().resolve()
     raw_text = str(server_file_path).strip()
@@ -61,56 +86,92 @@ def map_api_file_path(
         raise ValueError("Telegram no devolvió una ruta de archivo válida.")
 
     raw = Path(raw_text)
-    candidates: list[Path] = []
+    if not raw.is_absolute() and any(part in {"..", "."} for part in raw.parts):
+        raise ValueError("La ruta relativa devuelta por Telegram no es segura.")
+
+    directory_names = _bot_directory_names(host_root, bot_id, bot_dirs)
+    explicit_candidates: list[Path] = []
+    fallback_candidates: list[Path] = []
+
+    def is_our_dir(name: str) -> bool:
+        return _is_our_bot_directory(name, bot_id=bot_id, bot_dirs=directory_names)
 
     if raw.is_absolute():
-        resolved_raw = raw.resolve(strict=False)
-        # The Bot API wrapper may already have mapped the path into the app mount.
-        if _is_within(resolved_raw, host_root):
-            relative_host = resolved_raw.relative_to(host_root)
-            if relative_host.parts and relative_host.parts[0] in bot_dirs:
-                candidates.append(resolved_raw)
+        absolute = raw.resolve(strict=False)
 
-        # Absolute path reported by the local Bot API server.
-        if _is_within(resolved_raw, server_root):
-            relative_server = resolved_raw.relative_to(server_root)
-            if relative_server.parts and relative_server.parts[0] in bot_dirs:
-                candidates.append(host_root / relative_server)
-            elif relative_server.parts:
-                # Some Bot API builds return a path relative to the bot folder.
-                candidates.extend(host_root / bot_dir / relative_server for bot_dir in bot_dirs)
-    else:
-        if any(part in {"..", "."} for part in raw.parts):
-            raise ValueError("La ruta relativa devuelta por Telegram no es segura.")
-        if not bot_dirs:
-            raise ValueError("No se puede resolver una ruta relativa sin el token del bot.")
-        if raw.parts and raw.parts[0] in bot_dirs:
-            candidates.append(host_root / raw)
+        # The API wrapper may already have translated the path to the host mount.
+        if _is_within(absolute, host_root):
+            rel = absolute.relative_to(host_root)
+            if rel.parts and is_our_dir(rel.parts[0]):
+                explicit_candidates.append(absolute)
+
+        # Normal local Bot API response: /var/lib/telegram-bot-api/<id>:<token>/...
+        if _is_within(absolute, server_root):
+            rel = absolute.relative_to(server_root)
+            if rel.parts and is_our_dir(rel.parts[0]):
+                explicit_candidates.append(host_root / rel)
+            elif rel.parts:
+                # Some builds return an absolute path whose suffix is relative
+                # to the per-bot directory, omitting its directory name.
+                fallback_candidates.extend(host_root / name / rel for name in directory_names)
         else:
-            candidates.extend(host_root / bot_dir / raw for bot_dir in bot_dirs)
+            # Accommodate a server returning its own absolute data path even if
+            # that path differs from SERVER_FILES_ROOT, but only when the path
+            # explicitly identifies this bot's own directory.
+            parts = absolute.parts
+            for index, part in enumerate(parts):
+                if is_our_dir(part) and index < len(parts) - 1:
+                    explicit_candidates.append(host_root.joinpath(*parts[index:]))
+                    break
+    else:
+        if raw.parts and is_our_dir(raw.parts[0]):
+            explicit_candidates.append(host_root / raw)
+        else:
+            fallback_candidates.extend(host_root / name / raw for name in directory_names)
 
-    allowed_roots = tuple((host_root / bot_dir).resolve(strict=False) for bot_dir in bot_dirs)
-    seen: set[str] = set()
-    for candidate in candidates:
+    def existing_safe_file(candidate: Path) -> Path | None:
         try:
             resolved = candidate.resolve(strict=True)
         except (OSError, RuntimeError):
-            continue
-        key = str(resolved)
-        if key in seen:
-            continue
-        seen.add(key)
+            return None
         if not _is_within(resolved, host_root) or not resolved.is_file():
-            continue
-        if not any(_is_within(resolved, allowed_root) for allowed_root in allowed_roots):
-            continue
+            return None
+        try:
+            relative = resolved.relative_to(host_root)
+        except ValueError:
+            return None
+        if not relative.parts or not is_our_dir(relative.parts[0]):
+            return None
         return resolved
 
-    raise FileNotFoundError(
-        "El archivo de Telegram no existe en el volumen compartido del bot. "
-        "Verificá las raíces del Bot API, el montaje Docker y el directorio de datos del bot."
-    )
+    # When the API response names the exact directory, it is authoritative.
+    seen: set[str] = set()
+    for candidate in explicit_candidates:
+        result = existing_safe_file(candidate)
+        if result is not None and str(result) not in seen:
+            return result
+        if result is not None:
+            seen.add(str(result))
 
+    # A path without the directory name can be resolved only if it identifies
+    # exactly one file for this bot. Never guess between stale/duplicate files.
+    matches: dict[str, Path] = {}
+    for candidate in fallback_candidates:
+        result = existing_safe_file(candidate)
+        if result is not None:
+            matches[str(result)] = result
+    if len(matches) == 1:
+        return next(iter(matches.values()))
+    if len(matches) > 1:
+        raise FileNotFoundError(
+            "La ruta local del vídeo coincide con varios archivos del mismo bot; "
+            "se bloqueó la entrega para evitar enviar un archivo equivocado."
+        )
+
+    raise FileNotFoundError(
+        "No se pudo localizar o leer el archivo de Telegram en el volumen compartido. "
+        "Verificá el directorio de datos y los permisos de lectura del contenedor app."
+    )
 
 class BotScopedFilesPathWrapper(SimpleFilesPathWrapper):
     """Aiogram wrapper supporting absolute and per-bot-relative local paths."""

@@ -1,3 +1,5 @@
+> **Documento histórico:** este correctivo fue ampliado por `PATCH_MANIFEST_LOCAL_API_PATHS_V5.md`, que también resuelve carpetas retenidas tras un cambio de token. No usarlo como guía final de diagnóstico.
+
 # Correctivo de rutas de archivos Local Telegram Bot API (V4)
 
 ## Causa comprobada en el servidor

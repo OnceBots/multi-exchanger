@@ -1,4 +1,6 @@
-# Parche final: miniaturas obligatorias y permisos multimedia de salas
+# Parche final V5: miniaturas obligatorias, permisos multimedia y rutas locales
+
+La corrección actual de rutas del Bot API local está documentada en `PATCH_MANIFEST_LOCAL_API_PATHS_V5.md`; esa versión sustituye las reglas de mapeo más estrictas descritas en manifiestos anteriores.
 
 ## Cambios incluidos
 
@@ -33,12 +35,10 @@ Antes de reemplazar o recrear ese servicio, consulta su comando y sus montajes; 
 5. En el bot hijo, abre `🛡️ Moderación` con un usuario incluido en `ADMIN_IDS`. Deja todos los interruptores apagados salvo `🎬 Vídeos` para mantener la política predeterminada; habilita otros formatos únicamente cuando realmente los necesites.
 6. Prueba un vídeo pequeño y luego uno superior a 20 MB. Comprueba que el feed del admin y los miembros reciban la miniatura configurada. Si aparece el error sobre `--local`, detén ahí las pruebas con vídeos grandes y corrige el servicio Telegram Bot API antes de volver a probar. Nunca se enviará el original como fallback.
 
-## Validación realizada para este ZIP
+## Validación de la corrección V5
 
-- `python -m compileall -q app tests`: correcto.
-- `node --check app/webapp/static/app.js`: correcto.
-- 32 pruebas focalizadas de permisos, pipeline de miniaturas, mapeo de archivos del Bot API, difusión en salas y feed del administrador: todas pasan con dobles de Aiogram para probar la lógica aislada.
-- No se pudo ejecutar el conjunto completo de pytest ni construir la imagen Docker en este entorno de empaquetado porque Aiogram no está instalado y el acceso al índice de paquetes no está disponible. Por eso estas pruebas focalizadas no sustituyen una prueba de integración real con Telegram. En el servidor, después de reconstruir `app`, corre `python -m pytest -q` si las dependencias de `requirements.txt` están instaladas.
+- 16 pruebas focalizadas del mapeador de rutas pasaron con stubs de Aiogram: rutas absolutas y relativas, ID numérico, carpeta de token distinto, raíz absoluta de host, rechazo de otros bots y ambigüedad.
+- El conjunto completo de pytest y la integración real con Telegram/Vultr no se han ejecutado en este entorno; la dependencia Aiogram no está instalada aquí. La prueba en producción sigue siendo necesaria después de desplegar.
 
 ## Comprobación imprescindible antes de probar vídeos grandes
 

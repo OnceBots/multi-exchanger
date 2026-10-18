@@ -44,3 +44,7 @@ Interpretación:
 ## Relación con Screenshotit
 
 El repositorio público de Screenshotit describe generación de capturas de videos sin descargar el archivo completo y está publicado bajo GPL-3.0. Este proyecto no copia código de ese bot ni depende de sus servicios privados: aplica el principio de evitar descargas/copias innecesarias usando el Local Bot API Server. Como aquí la miniatura pedida es una imagen predeterminada, extraer frames con FFmpeg no acelera la preparación y haría algo distinto (miniaturas tomadas del contenido del video). Si más adelante se quiere generar una captura real del video, se puede agregar como modo opcional independiente.
+
+## V5: carpetas del Bot API local tras cambio de token
+
+El resolver de rutas admite directorios con patrón `<ID_NUMERICO>:<token>` siempre que el ID coincida con el bot que recibió el mensaje. No selecciona archivos de otros IDs y rechaza coincidencias relativas ambiguas. Las raíces de Compose siguen siendo `/var/lib/telegram-bot-api` en el contenedor Bot API y `/srv/tg-bot-api-data` en la app.
