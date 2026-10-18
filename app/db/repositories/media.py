@@ -46,7 +46,7 @@ class MediaRepository:
         now = utcnow()
         await self.groups.update_one(
             {"bot_id": bot_id, "room_id": room_id, "media_group_id": media_group_id},
-            {"$setOnInsert": {"bot_id": bot_id, "room_id": room_id, "media_group_id": media_group_id, "sender_id": sender_id, "caption": caption, "items": [], "created_at": now, "status": "COLLECTING"}, "$set": {"updated_at": now}, "$push": {"items": item}},
+            {"$setOnInsert": {"bot_id": bot_id, "room_id": room_id, "media_group_id": media_group_id, "sender_id": sender_id, "caption": caption, "created_at": now, "status": "COLLECTING"}, "$set": {"updated_at": now}, "$push": {"items": item}},
             upsert=True,
         )
         return await self.groups.find_one({"bot_id": bot_id, "room_id": room_id, "media_group_id": media_group_id}) or {}
