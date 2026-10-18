@@ -12,3 +12,7 @@ def configure_logging(level: str = "INFO") -> None:
         force=True,
     )
     logging.getLogger("uvicorn.access").setLevel(logging.INFO)
+    # httpx logs full request URLs at INFO. The raw Bot API getFile URL contains
+    # the bot token in its path, so avoid leaking credentials into Vultr logs.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)

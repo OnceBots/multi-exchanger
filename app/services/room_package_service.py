@@ -34,6 +34,25 @@ _GLOBAL_API_WRITE_INTERVAL = 0.05  # Keep this service below ~20 outbound sends/
 _GLOBAL_DISK_RESERVATION_LOCK = asyncio.Lock()
 _GLOBAL_RESERVED_DISK_BYTES = 0
 _DISK_FREE_RESERVE_BYTES = 512 * _MIB
+_GET_FILE_MAX_ATTEMPTS = 3
+_GET_FILE_RETRY_BASE_SECONDS = 0.35
+
+
+class MediaDownloadError(RuntimeError):
+    """A safe, classified download error that never contains the Bot API URL/token."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str,
+        user_message: str | None = None,
+        http_status: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = str(code)
+        self.user_message = str(user_message or message)
+        self.http_status = int(http_status) if http_status is not None else None
 
 
 def format_bytes(value: int) -> str:
@@ -762,55 +781,225 @@ class RoomPackageService:
                         target_path.unlink(missing_ok=True)
                     except OSError:
                         pass
+                safe_error = self._safe_download_error(exc)
                 if current and current.get("status") in {"QUEUED", "DOWNLOADING"}:
                     async with self._lock(self._assignment_locks, scope_key):
-                        await self.repo.mark_item_failed(self.ctx.bot_id, current, str(exc))
-                    await self._notify_source_failure(item, str(exc))
+                        await self.repo.mark_item_failed(self.ctx.bot_id, current, safe_error)
+                    await self._notify_source_failure(item, exc)
                     await self.schedule_progress_refresh(str(current.get("package_id") or ""))
                 elif not current or current.get("status") not in {"STAGED", "STAGED_DELETE_PENDING"}:
-                    await self._notify_source_failure(item, str(exc))
+                    await self._notify_source_failure(item, exc)
                 self.logger.warning(
-                    "room_package_item_failed bot_id=%s room_id=%s item_id=%s error_type=%s",
-                    self.ctx.bot_id, room_id, item_id, type(exc).__name__,
+                    "room_package_item_failed bot_id=%s room_id=%s item_id=%s media_type=%s error_type=%s error_code=%s http_status=%s detail=%s",
+                    self.ctx.bot_id, room_id, item_id, item.get("media_type"), type(exc).__name__,
+                    getattr(exc, "code", "download_or_stage_failed"), getattr(exc, "http_status", None), safe_error[:180],
                 )
 
-    async def _download_to_local(self, item: dict, destination: Path) -> int:
-        """Fetch getFile metadata raw to avoid Aiogram's path wrapper raising early.
+    def _safe_download_error(self, exc: Exception) -> str:
+        """Return a short persisted/logged detail without leaking tokens or request URLs."""
+        if isinstance(exc, MediaDownloadError):
+            detail = f"{exc.code}: {exc}"
+        elif isinstance(exc, httpx.HTTPError):
+            # HTTPX exceptions include the full URL, which contains the bot token.
+            detail = f"httpx_{type(exc).__name__}"
+        elif isinstance(exc, FileNotFoundError):
+            detail = "local_file_not_found_or_not_readable"
+        elif isinstance(exc, PermissionError):
+            detail = "local_file_permission_denied"
+        elif isinstance(exc, OSError) and getattr(exc, "errno", None) == 28:
+            detail = "insufficient_disk_space"
+        elif isinstance(exc, OSError):
+            # Filesystem exception strings often include the source path, which in
+            # local Bot API mode may contain an old token-named data directory.
+            detail = f"filesystem_io_error_errno={getattr(exc, 'errno', None)}"
+        else:
+            detail = f"{type(exc).__name__}: {exc}"
+        token = str(getattr(self.ctx.bot, "token", "") or "").strip()
+        if token:
+            detail = detail.replace(token, "[bot-token-redacted]")
+        detail = re.sub(r"https?://\S+", "[url-redacted]", detail)
+        return detail[:360]
 
-        In local Bot API mode, getFile provides a path in the Bot API server's
-        data root. We map that path against the read-only shared mount and copy
-        to this app's persistent volume. For cloud mode, Aiogram downloads via HTTP.
+    def _telegram_getfile_error(self, status: int, payload: dict, response_text: str = "") -> MediaDownloadError:
+        """Translate Telegram's JSON error body before handling HTTP status.
+
+        Calling response.raise_for_status() first discards the useful Bot API
+        description and leaves only a generic HTTPStatusError in item logs.
+        """
+        description = str(payload.get("description") or response_text or "sin descripción")
+        token = str(getattr(self.ctx.bot, "token", "") or "").strip()
+        if token:
+            description = description.replace(token, "[bot-token-redacted]")
+        description = re.sub(r"https?://\S+", "[url-redacted]", description).strip()[:220]
+        lower = description.lower()
+        api_code = payload.get("error_code", status)
+        if "file is too big" in lower:
+            if bool(self.ctx.settings.telegram_api_local_mode):
+                return MediaDownloadError(
+                    "Telegram rechazó getFile por tamaño; comprobar que el servidor Bot API se inició realmente con --local.",
+                    code="telegram_file_too_large_local_mode_check",
+                    user_message="Telegram rechazó este archivo por su tamaño. El original se conserva. El administrador debe verificar que el Bot API local se ejecute con --local y que el límite de descarga esté configurado correctamente.",
+                    http_status=status,
+                )
+            return MediaDownloadError(
+                "Telegram rechazó getFile por el límite de tamaño del Bot API alojado.",
+                code="telegram_file_too_large_cloud_api",
+                user_message="Este archivo supera el límite de descarga del Bot API alojado. El original se conserva; avisá al administrador.",
+                http_status=status,
+            )
+        if "wrong file identifier" in lower or "file identifier" in lower or "file_id" in lower:
+            return MediaDownloadError(
+                f"Telegram rechazó el identificador del archivo (HTTP {status}, código {api_code}): {description}",
+                code="telegram_file_id_rejected",
+                user_message="Telegram no reconoce el identificador de este archivo para este bot. El original se conserva. Probá reenviar el vídeo o archivo; si vuelve a ocurrir, avisá al administrador.",
+                http_status=status,
+            )
+        return MediaDownloadError(
+            f"Telegram rechazó getFile (HTTP {status}, código {api_code}): {description}",
+            code="telegram_getfile_rejected",
+            user_message="Telegram rechazó la descarga de este archivo. El original se conserva y no se añadió al ZIP. Probá reenviarlo; si vuelve a fallar, avisá al administrador.",
+            http_status=status,
+        )
+
+    async def _get_file_metadata(self, url: str, file_id: str, timeout: int) -> dict:
+        """Request getFile with bounded retries and retain Telegram's exact safe error."""
+        request_timeout = min(max(30, int(timeout)), 120)
+        last_transport_error: Exception | None = None
+        async with httpx.AsyncClient(timeout=request_timeout) as client:
+            for attempt in range(_GET_FILE_MAX_ATTEMPTS):
+                try:
+                    response = await client.post(url, json={"file_id": str(file_id)})
+                except (httpx.TimeoutException, httpx.TransportError) as exc:
+                    last_transport_error = exc
+                    if attempt + 1 < _GET_FILE_MAX_ATTEMPTS:
+                        await asyncio.sleep(_GET_FILE_RETRY_BASE_SECONDS * (2 ** attempt))
+                        continue
+                    raise MediaDownloadError(
+                        "No se pudo contactar con el Bot API después de varios intentos.",
+                        code="bot_api_transport_exhausted",
+                        user_message="El servicio de Telegram no respondió después de varios intentos. El original se conserva; esperá un momento y volvé a enviarlo.",
+                    ) from None
+
+                try:
+                    payload = response.json()
+                    if not isinstance(payload, dict):
+                        payload = {}
+                except (ValueError, TypeError):
+                    payload = {}
+                api_code = payload.get("error_code", response.status_code)
+                try:
+                    api_code_int = int(api_code or 0)
+                except (TypeError, ValueError):
+                    api_code_int = 0
+                retryable = response.status_code in {408, 425, 429, 500, 502, 503, 504} or api_code_int in {408, 425, 429, 500, 502, 503, 504}
+                if retryable and attempt + 1 < _GET_FILE_MAX_ATTEMPTS:
+                    retry_after = response.headers.get("Retry-After", "")
+                    try:
+                        delay = float(retry_after)
+                    except (TypeError, ValueError):
+                        delay = _GET_FILE_RETRY_BASE_SECONDS * (2 ** attempt)
+                    await asyncio.sleep(max(0.0, min(delay, 4.0)))
+                    continue
+
+                if response.status_code >= 400 or not payload.get("ok"):
+                    if retryable:
+                        description = str(payload.get("description") or "servicio temporalmente no disponible")[:160]
+                        raise MediaDownloadError(
+                            f"Bot API temporalmente no disponible después de {_GET_FILE_MAX_ATTEMPTS} intentos (HTTP {response.status_code}): {description}",
+                            code="bot_api_temporary_error_exhausted",
+                            user_message="Telegram tuvo un problema temporal al descargar este archivo. Se hicieron varios intentos y el original se conserva; probá reenviarlo en unos minutos.",
+                            http_status=response.status_code,
+                        )
+                    try:
+                        response_text = response.text
+                    except Exception:
+                        response_text = ""
+                    try:
+                        api_error_status = int(api_code or response.status_code)
+                    except (TypeError, ValueError):
+                        api_error_status = response.status_code
+                    error_status = response.status_code if response.status_code >= 400 else api_error_status
+                    raise self._telegram_getfile_error(error_status, payload, response_text)
+
+                result = payload.get("result")
+                if not isinstance(result, dict):
+                    raise MediaDownloadError(
+                        "La respuesta de getFile no contiene result válido.",
+                        code="bot_api_invalid_getfile_response",
+                        user_message="Telegram devolvió una respuesta de descarga incompleta. El original se conserva; probá reenviar el archivo.",
+                        http_status=response.status_code,
+                    )
+                return payload
+        # Kept as a defensive guard in case the retry loop is edited later.
+        raise MediaDownloadError(
+            f"No se pudo consultar getFile ({type(last_transport_error).__name__ if last_transport_error else 'unknown'}).",
+            code="bot_api_getfile_failed",
+            user_message="No se pudo consultar el archivo en Telegram. El original se conserva; probá reenviarlo.",
+        )
+
+    async def _resolve_local_api_file_with_retry(self, file_path: str) -> Path:
+        """Allow short filesystem propagation delays after local Bot API getFile."""
+        last_error: Exception | None = None
+        for attempt in range(3):
+            try:
+                return await asyncio.to_thread(self._resolve_local_api_file, file_path)
+            except FileNotFoundError as exc:
+                last_error = exc
+                if "otro bot" in str(exc).lower() or attempt == 2:
+                    break
+                await asyncio.sleep(_GET_FILE_RETRY_BASE_SECONDS * (attempt + 1))
+        raise MediaDownloadError(
+            "Telegram devolvió file_path, pero el archivo no apareció en el volumen compartido tras tres comprobaciones.",
+            code="local_bot_api_file_missing",
+            user_message="Telegram identificó el archivo, pero Vultr no encontró su copia en el volumen compartido. El original se conserva y se avisó al administrador; probá reenviarlo si persiste.",
+        ) from last_error
+
+    async def _download_to_local(self, item: dict, destination: Path) -> int:
+        """Download through the configured Bot API with retries and safe diagnostics.
+
+        Local mode maps the Bot API server file path to the read-only host mount;
+        cloud mode downloads through Aiogram's HTTP file endpoint.
         """
         base = str(self.ctx.settings.telegram_api_base_url).rstrip("/")
         token = str(getattr(self.ctx.bot, "token", "") or "").strip()
         if not token:
-            raise RuntimeError("El bot no tiene token disponible para descargar el archivo.")
+            raise MediaDownloadError(
+                "El bot no tiene token disponible para descargar el archivo.",
+                code="bot_token_missing",
+                user_message="El servicio de descarga de este bot no está configurado correctamente. El original se conserva; avisá al administrador.",
+            )
         url = f"{base}/bot{quote(token, safe=':')}/getFile"
         timeout = max(30, int(getattr(self.ctx.settings, "telegram_api_timeout_seconds", 7200)))
-        async with httpx.AsyncClient(timeout=min(timeout, 120)) as client:
-            response = await client.post(url, json={"file_id": item["file_id"]})
-            response.raise_for_status()
-            payload = response.json()
-        if not payload.get("ok") or not isinstance(payload.get("result"), dict):
-            description = str(payload.get("description") or "getFile rechazó el archivo")
-            raise RuntimeError(description[:300])
+        payload = await self._get_file_metadata(url, str(item["file_id"]), timeout)
         file_path = str(payload["result"].get("file_path") or "")
         if not file_path:
-            raise RuntimeError("Telegram no devolvió la ruta del archivo.")
+            raise MediaDownloadError(
+                "Telegram no devolvió la ruta del archivo.",
+                code="bot_api_file_path_missing",
+                user_message="Telegram no devolvió la ubicación del archivo. El original se conserva; probá reenviarlo.",
+            )
         destination.parent.mkdir(parents=True, exist_ok=True)
         expected = int(payload["result"].get("file_size") or item.get("expected_size") or 0)
         if expected > self.max_bytes:
-            raise RuntimeError(f"El archivo supera el máximo del paquete ({format_bytes(self.max_bytes)}); no se borró el original.")
+            raise MediaDownloadError(
+                f"El archivo supera el máximo del paquete ({format_bytes(self.max_bytes)}).",
+                code="file_exceeds_package_limit",
+                user_message=f"Este archivo supera el máximo permitido por archivo ({format_bytes(self.max_bytes)}). El original se conserva.",
+            )
         # Reserve disk space across all child bots before starting large copies.
         # ZIP creation later needs a second copy of roughly the same size.
         reservation = max(expected, 32 * _MIB)
         await self._reserve_disk_space(reservation)
         try:
             if bool(self.ctx.settings.telegram_api_local_mode):
-                source_path = await asyncio.to_thread(self._resolve_local_api_file, file_path)
+                source_path = await self._resolve_local_api_file_with_retry(file_path)
                 actual_source_size = await asyncio.to_thread(lambda: source_path.stat().st_size)
                 if actual_source_size > self.max_bytes:
-                    raise RuntimeError(f"El archivo supera el máximo del paquete ({format_bytes(self.max_bytes)}); no se borró el original.")
+                    raise MediaDownloadError(
+                        f"El archivo supera el máximo del paquete ({format_bytes(self.max_bytes)}).",
+                        code="file_exceeds_package_limit",
+                        user_message=f"Este archivo supera el máximo permitido por archivo ({format_bytes(self.max_bytes)}). El original se conserva.",
+                    )
                 if actual_source_size > reservation:
                     # Update the reservation if the Bot API did not report a size.
                     await self._increase_disk_reservation(actual_source_size - reservation)
@@ -819,15 +1008,36 @@ class RoomPackageService:
             else:
                 # In cloud mode the standard Bot API requires downloadFile; use the
                 # configured Aiogram session, which is not wrapped in local mode.
-                await self.ctx.bot.download_file(file_path, destination=destination, timeout=timeout)
+                try:
+                    await self.ctx.bot.download_file(file_path, destination=destination, timeout=timeout)
+                except Exception as exc:
+                    raise MediaDownloadError(
+                        f"La descarga HTTP de Telegram falló ({type(exc).__name__}).",
+                        code="telegram_file_download_failed",
+                        user_message="Telegram rechazó o interrumpió la descarga. El original se conserva; probá reenviarlo.",
+                    ) from None
                 # Aiogram closes the file after download, but fsync makes the staged
                 # data durable before we record it and delete the user's message.
                 await asyncio.to_thread(self._fsync_file, destination)
             actual = destination.stat().st_size
+            if actual <= 0:
+                raise MediaDownloadError(
+                    "El archivo descargado está vacío.",
+                    code="empty_download",
+                    user_message="La descarga llegó vacía o incompleta. El original se conserva; probá reenviarlo.",
+                )
             if actual > self.max_bytes:
-                raise RuntimeError(f"El archivo supera el máximo del paquete ({format_bytes(self.max_bytes)}); no se borró el original.")
+                raise MediaDownloadError(
+                    f"El archivo supera el máximo del paquete ({format_bytes(self.max_bytes)}).",
+                    code="file_exceeds_package_limit",
+                    user_message=f"Este archivo supera el máximo permitido por archivo ({format_bytes(self.max_bytes)}). El original se conserva.",
+                )
             if expected and actual != expected:
-                raise RuntimeError(f"El tamaño descargado no coincide con el informado por Telegram ({actual} != {expected}).")
+                raise MediaDownloadError(
+                    f"El tamaño descargado no coincide con el informado por Telegram ({actual} != {expected}).",
+                    code="download_size_mismatch",
+                    user_message="La descarga llegó incompleta o con un tamaño inconsistente. El original se conserva; probá reenviarlo.",
+                )
             return actual
         finally:
             await self._release_disk_reservation(reservation)
@@ -996,9 +1206,19 @@ class RoomPackageService:
             except Exception:
                 pass
 
-    async def _notify_source_failure(self, item: dict, error: str) -> None:
+    async def _notify_source_failure(self, item: dict, error: Exception | str) -> None:
         # The original remains visible until the download is fully staged.
-        message = "❌ No pude descargar y guardar este archivo en Vultr. El mensaje original se conserva; no se ha borrado ni añadido al ZIP."
+        if isinstance(error, MediaDownloadError):
+            reason = error.user_message
+        elif isinstance(error, OSError) and getattr(error, "errno", None) == 28:
+            reason = "No hay espacio libre suficiente en Vultr. El original se conserva; avisá al administrador."
+        elif isinstance(error, PermissionError):
+            reason = "Vultr no tiene permiso para leer o guardar este archivo. El original se conserva; avisá al administrador."
+        elif isinstance(error, FileNotFoundError):
+            reason = "No se encontró la copia local del archivo en el Bot API. El original se conserva; probá reenviarlo y avisá al administrador si persiste."
+        else:
+            reason = "Ocurrió un error al descargar el archivo. El original se conserva; probá reenviarlo. Si vuelve a fallar, avisá al administrador."
+        message = f"❌ No pude descargar y guardar este archivo en Vultr. {reason} No se borró ni añadió al ZIP."
         try:
             await self._pace_outbound_call()
             await self.ctx.bot.send_message(chat_id=int(item["sender_id"]), text=message)
@@ -1122,6 +1342,7 @@ class RoomPackageService:
                     text = self._status_text(viewer_package)
                     old_id = (package.get("status_message_ids") or {}).get(str(uid))
                     markup = self._status_markup(package_id, uid)
+                    replace_old_id: int | None = None
                     if old_id:
                         try:
                             await self._pace_outbound_call()
@@ -1131,11 +1352,29 @@ class RoomPackageService:
                             )
                             return
                         except Exception as exc:
-                            if "message is not modified" in str(exc).lower():
+                            error_text = str(exc).lower()
+                            if "message is not modified" in error_text:
+                                return
+                            if self._is_stale_status_message_error(exc):
+                                # Replace only when Telegram confirms the old card is
+                                # missing/uneditable. For transient/network failures, do
+                                # not send another card: the next refresh will retry edit.
+                                replace_old_id = int(old_id)
+                                self.logger.info(
+                                    "room_package_status_card_stale bot_id=%s room_id=%s user_id=%s old_message_id=%s error_type=%s",
+                                    self.ctx.bot_id, room_id, uid, replace_old_id, type(exc).__name__,
+                                )
+                            else:
+                                self.logger.warning(
+                                    "room_package_status_edit_failed bot_id=%s room_id=%s package_id=%s user_id=%s message_id=%s error_type=%s",
+                                    self.ctx.bot_id, room_id, package_id, uid, int(old_id), type(exc).__name__,
+                                )
                                 return
                     try:
                         await self._pace_outbound_call()
                         sent = await asyncio.wait_for(self.ctx.bot.send_message(uid, text, reply_markup=markup), timeout=20)
+                        # Persist the replacement ID before attempting cleanup. This way,
+                        # a deletion failure cannot make later refreshes create yet more cards.
                         await self.repo.set_status_message(self.ctx.bot_id, package_id, uid, int(sent.message_id))
                         # Pin the room's shared progress card in member chats. Pinning is
                         # best-effort and a rejection never blocks downloads or delivery.
@@ -1158,6 +1397,29 @@ class RoomPackageService:
                                     "room_package_status_pin_failed bot_id=%s package_id=%s user_id=%s error_type=%s",
                                     self.ctx.bot_id, package_id, uid, type(pin_exc).__name__,
                                 )
+                        if replace_old_id is not None:
+                            # Replace an obsolete pinned card; never leave the previous
+                            # card as a second visible status message.
+                            if should_pin:
+                                try:
+                                    await self._pace_outbound_call()
+                                    await asyncio.wait_for(
+                                        self.ctx.bot.unpin_chat_message(chat_id=uid, message_id=replace_old_id),
+                                        timeout=15,
+                                    )
+                                except Exception:
+                                    pass
+                            try:
+                                await self._pace_outbound_call()
+                                await asyncio.wait_for(
+                                    self.ctx.bot.delete_message(chat_id=uid, message_id=replace_old_id),
+                                    timeout=15,
+                                )
+                            except Exception as delete_exc:
+                                self.logger.warning(
+                                    "room_package_status_old_card_cleanup_failed bot_id=%s room_id=%s user_id=%s old_message_id=%s error_type=%s",
+                                    self.ctx.bot_id, room_id, uid, replace_old_id, type(delete_exc).__name__,
+                                )
                     except Exception as exc:
                         self.logger.debug("room_package_status_send_failed bot_id=%s room_id=%s user_id=%s error_type=%s", self.ctx.bot_id, room_id, uid, type(exc).__name__)
 
@@ -1166,6 +1428,24 @@ class RoomPackageService:
             for start in range(0, len(recipient_list), batch_size):
                 batch = recipient_list[start:start + batch_size]
                 await asyncio.gather(*(update_one(uid) for uid in batch), return_exceptions=True)
+
+    @staticmethod
+    def _is_stale_status_message_error(exc: Exception) -> bool:
+        """True only for Telegram errors that justify replacing the existing card.
+
+        Any other edit failure is treated as transient and does not create a second
+        progress message, preventing duplicate cards during rate limits/timeouts.
+        """
+        text = str(exc).lower()
+        stale_markers = (
+            "message to edit not found",
+            "message_id_invalid",
+            "message identifier is not specified",
+            "message can't be edited",
+            "message cannot be edited",
+            "message to unpin not found",
+        )
+        return any(marker in text for marker in stale_markers)
 
     def _status_text(self, package: dict) -> str:
         used = max(int(package.get("staged_bytes", 0)), int(package.get("reserved_bytes", 0)))

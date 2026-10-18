@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 from cryptography.fernet import Fernet
 
-from app.services.room_package_service import RoomPackageService, format_bytes, progress_bar, safe_archive_filename
+from app.services.room_package_service import MediaDownloadError, RoomPackageService, format_bytes, progress_bar, safe_archive_filename
 
 
 class UnusedRepository:
@@ -298,7 +298,7 @@ async def test_room_progress_cards_are_consolidated_into_the_current_shared_pack
 
 
 @pytest.mark.asyncio
-async def test_download_failure_is_recorded_without_masking_error_or_deleting_original(tmp_path, monkeypatch):
+async def test_download_failure_is_safely_recorded_without_deleting_original(tmp_path, monkeypatch):
     service = build_service(tmp_path)
     item = {
         "bot_id": 12345,
@@ -352,8 +352,171 @@ async def test_download_failure_is_recorded_without_masking_error_or_deleting_or
     await service._process_item("item-failure-1")
 
     assert repo.item["status"] == "FAILED"
-    assert repo.failed_error == "test path failure"
+    assert repo.failed_error == "local_file_not_found_or_not_readable"
     assert deleted_messages == []
+
+
+
+
+class FakeHTTPResponse:
+    def __init__(self, status_code: int, payload: dict, headers: dict | None = None):
+        self.status_code = status_code
+        self._payload = payload
+        self.headers = headers or {}
+        self.text = str(payload)
+
+    def json(self):
+        return self._payload
+
+
+@pytest.mark.asyncio
+async def test_get_file_http_400_preserves_telegram_reason_without_token_leak(tmp_path, monkeypatch):
+    import app.services.room_package_service as package_module
+
+    service = build_service(tmp_path)
+    responses = [FakeHTTPResponse(400, {
+        "ok": False,
+        "error_code": 400,
+        "description": "Bad Request: wrong file identifier/HTTP URL specified",
+    })]
+    calls = []
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def post(self, url, json):
+            calls.append((url, json))
+            return responses.pop(0)
+
+    monkeypatch.setattr(package_module.httpx, "AsyncClient", FakeClient)
+    with pytest.raises(MediaDownloadError) as error:
+        await service._get_file_metadata(
+            "http://telegram-bot-api:8081/bot12345:CURRENT_TOKEN/getFile", "file-id", 60
+        )
+
+    assert error.value.code == "telegram_file_id_rejected"
+    assert "wrong file identifier" in str(error.value).lower()
+    assert "CURRENT_TOKEN" not in str(error.value)
+    assert len(calls) == 1  # Permanent 400s are not retried blindly.
+
+
+@pytest.mark.asyncio
+async def test_get_file_retries_temporary_http_502_then_succeeds(tmp_path, monkeypatch):
+    import app.services.room_package_service as package_module
+
+    service = build_service(tmp_path)
+    responses = [
+        FakeHTTPResponse(502, {"ok": False, "error_code": 502, "description": "Bad Gateway"}),
+        FakeHTTPResponse(200, {"ok": True, "result": {"file_path": "12345:CURRENT/videos/file_1.mp4", "file_size": 12}}),
+    ]
+    calls = []
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def post(self, url, json):
+            calls.append((url, json))
+            return responses.pop(0)
+
+    async def no_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr(package_module.httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(package_module.asyncio, "sleep", no_sleep)
+    payload = await service._get_file_metadata("http://telegram-bot-api:8081/getFile", "file-id", 60)
+
+    assert payload["ok"] is True
+    assert payload["result"]["file_size"] == 12
+    assert len(calls) == 2
+
+
+def test_safe_download_error_never_persists_http_request_url_or_bot_token(tmp_path):
+    import httpx
+
+    service = build_service(tmp_path)
+    token = service.ctx.bot.token
+    exc = httpx.ConnectError(f"connect failed for http://telegram-bot-api:8081/bot{token}/getFile")
+
+    safe = service._safe_download_error(exc)
+
+    assert token not in safe
+    assert "/bot" not in safe
+    assert safe == "httpx_ConnectError"
+
+
+@pytest.mark.asyncio
+async def test_local_api_file_path_resolution_retries_short_filesystem_race(tmp_path, monkeypatch):
+    import app.services.room_package_service as package_module
+
+    service = build_service(tmp_path)
+    target = Path(service.ctx.settings.telegram_api_host_files_root) / "12345:CURRENT_TOKEN" / "videos" / "source.mp4"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"video")
+    calls = 0
+    original_resolver = service._resolve_local_api_file
+
+    def sometimes_missing(file_path):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise FileNotFoundError("not ready yet")
+        return original_resolver(str(target))
+
+    async def no_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr(service, "_resolve_local_api_file", sometimes_missing)
+    monkeypatch.setattr(package_module.asyncio, "sleep", no_sleep)
+    result = await service._resolve_local_api_file_with_retry("some/path")
+
+    assert result == target.resolve()
+    assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_get_file_size_error_explains_local_api_requirement(tmp_path, monkeypatch):
+    import app.services.room_package_service as package_module
+
+    service = build_service(tmp_path)
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def post(self, url, json):
+            return FakeHTTPResponse(400, {
+                "ok": False,
+                "error_code": 400,
+                "description": "Bad Request: file is too big",
+            })
+
+    monkeypatch.setattr(package_module.httpx, "AsyncClient", FakeClient)
+    with pytest.raises(MediaDownloadError) as error:
+        await service._get_file_metadata("http://telegram-bot-api:8081/getFile", "file-id", 60)
+
+    assert error.value.code == "telegram_file_too_large_local_mode_check"
+    assert "--local" in str(error.value)
+    assert "--local" in error.value.user_message
 
 
 async def _async_noop(*args, **kwargs):
@@ -767,3 +930,27 @@ async def test_cleanup_keeps_legacy_source_directory_while_another_segment_refer
     assert not target_dir.exists()
     assert legacy_file.exists()
     assert repo.doc["merged_legacy_package_ids"] == [legacy_id]
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Bad Request: message to edit not found",
+        "Bad Request: message can't be edited",
+        "Bad Request: message identifier is not specified",
+    ],
+)
+def test_status_card_replacement_only_for_stale_telegram_message(message):
+    assert RoomPackageService._is_stale_status_message_error(RuntimeError(message)) is True
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Too Many Requests: retry after 3",
+        "network timeout while editing message",
+        "Forbidden: bot was blocked by the user",
+        "Bad Request: message is not modified",
+    ],
+)
+def test_status_card_transient_or_non_stale_errors_do_not_trigger_replacement(message):
+    assert RoomPackageService._is_stale_status_message_error(RuntimeError(message)) is False
