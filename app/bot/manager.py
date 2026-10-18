@@ -33,6 +33,7 @@ class RepositoryBundle:
         from app.db.repositories.media import MediaRepository
         from app.db.repositories.rooms import RoomRepository
         from app.db.repositories.room_packages import RoomPackageRepository
+        from app.db.repositories.room_referrals import RoomReferralRepository
         from app.db.repositories.sessions import SessionRepository
         from app.db.repositories.users import UserRepository
 
@@ -40,6 +41,7 @@ class RepositoryBundle:
         self.user = UserRepository(mongo)
         self.room = RoomRepository(mongo)
         self.packages = RoomPackageRepository(mongo)
+        self.referrals = RoomReferralRepository(mongo)
         self.media = MediaRepository(mongo)
         self.session = SessionRepository(mongo)
         self.audit = AuditRepository(mongo)

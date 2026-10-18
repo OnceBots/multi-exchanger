@@ -18,7 +18,7 @@ class RoomRepository:
         alphabet = string.ascii_uppercase + string.digits
         return "".join(secrets.choice(alphabet) for _ in range(7))
 
-    async def create(self, bot_id: int, owner_id: int, visibility: str, max_members: int, settings: dict, duration_minutes: int, password: str | None = None) -> dict:
+    async def create(self, bot_id: int, owner_id: int, visibility: str, max_members: int, settings: dict, duration_minutes: int, password: str | None = None, referral_cost: int = 0) -> dict:
         created = utcnow()
         expires_at = None
         if duration_minutes > 0:
@@ -46,6 +46,7 @@ class RoomRepository:
             "room_id": room_id,
             "invite_code": invite_code,
             "owner_id": owner_id,
+            "referral_cost": max(0, int(referral_cost)),
             # Backward-compatible label: the room name is the generated 7-char code.
             "name": invite_code,
             "visibility": visibility,
@@ -60,7 +61,12 @@ class RoomRepository:
             "updated_at": created,
         }
         await self.rooms.insert_one(room)
-        await self.members.insert_one({"bot_id": bot_id, "room_id": room_id, "user_id": owner_id, "role": MemberRole.OWNER.value, "joined_at": created})
+        try:
+            await self.members.insert_one({"bot_id": bot_id, "room_id": room_id, "user_id": owner_id, "role": MemberRole.OWNER.value, "joined_at": created})
+        except Exception:
+            # Do not consume referral credits for a partially-created room.
+            await self.rooms.delete_one({"bot_id": bot_id, "room_id": room_id})
+            raise
         return room
 
     async def get(self, bot_id: int, room_id: str) -> dict | None:

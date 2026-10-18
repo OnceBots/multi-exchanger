@@ -20,6 +20,7 @@ async def ensure_indexes(mongo) -> None:
     packages = mongo.collection("room_media_packages")
     package_items = mongo.collection("room_media_package_items")
     package_deliveries = mongo.collection("room_media_package_deliveries")
+    room_referrals = mongo.collection("room_referrals")
 
     await bots.create_index("bot_id", unique=True)
     await bots.create_index([("owner_id", 1), ("created_at", -1)])
@@ -33,6 +34,9 @@ async def ensure_indexes(mongo) -> None:
     await members.create_index([("bot_id", 1), ("room_id", 1), ("user_id", 1)], unique=True)
     await members.create_index([("bot_id", 1), ("user_id", 1)])
     await members.create_index([("bot_id", 1), ("room_id", 1), ("role", 1)])
+    # A newly referred Telegram user can award at most one referral credit per child bot.
+    await room_referrals.create_index([("bot_id", 1), ("referred_user_id", 1)], unique=True)
+    await room_referrals.create_index([("bot_id", 1), ("referrer_id", 1), ("created_at", -1)])
 
     await media.create_index([("bot_id", 1), ("event_key", 1)], unique=True)
     await media.create_index([("bot_id", 1), ("room_id", 1), ("created_at", -1)])

@@ -10,7 +10,7 @@ from app.services.room_package_service import RoomPackageService
 
 
 def build_child_services(ctx):
-    rooms = RoomService(ctx.repositories)
+    rooms = RoomService(ctx.repositories, admin_ids=getattr(ctx.settings, "admin_ids", ()))
     media = MediaService(ctx, rooms)
     broadcast = BroadcastService(ctx)
     admin_feed = AdminFeedService(ctx)

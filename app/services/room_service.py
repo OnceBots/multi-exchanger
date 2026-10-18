@@ -1,21 +1,95 @@
 from __future__ import annotations
 
+import asyncio
+from typing import Any
+
 from app.core.enums import MemberRole, RoomVisibility
 
 
-class RoomService:
-    def __init__(self, repositories) -> None:
-        self.repositories = repositories
+class InsufficientReferralCredits(ValueError):
+    """A user cannot create a non-admin room without ten available referrals."""
 
-    async def create_room(self, bot_id: int, owner_id: int, visibility: str, max_members: int, settings: dict, duration_minutes: int, password: str | None = None) -> dict:
-        max_members = max(2, min(max_members, 10000))
+    def __init__(self, available: int, required: int = 10) -> None:
+        self.available = max(0, int(available))
+        self.required = max(1, int(required))
+        missing = max(0, self.required - self.available)
+        super().__init__(
+            f"Crear una sala cuesta {self.required} referidos válidos. "
+            f"Tienes {self.available} disponibles y te faltan {missing}. "
+            "Comparte tu enlace personal y consigue nuevos usuarios que inicien el bot desde él."
+        )
+
+
+class RoomService:
+    ROOM_REFERRAL_COST = 10
+
+    def __init__(self, repositories, admin_ids=None) -> None:
+        self.repositories = repositories
+        self.admin_ids = frozenset(int(user_id) for user_id in (admin_ids or ()))
+        # The deployment runs a single application process. Serialize attempts
+        # for the same owner so simultaneous bot/Mini App requests cannot spend
+        # the same referral credits twice in that process.
+        self._creation_locks: dict[tuple[int, int], asyncio.Lock] = {}
+
+    async def get_creation_status(self, bot_id: int, user_id: int) -> dict[str, Any]:
+        user_id = int(user_id)
+        is_admin = user_id in self.admin_ids
+        referral_repo = getattr(self.repositories, "referrals", None)
+        if referral_repo is None:
+            stats = {
+                "valid_referrals": 0,
+                "rooms_paid": 0,
+                "credits_spent": 0,
+                "credits_available": 0,
+                "credits_required_per_room": self.ROOM_REFERRAL_COST,
+            }
+        else:
+            stats = await referral_repo.stats(int(bot_id), user_id)
+        return {**stats, "is_admin": is_admin, "required": self.ROOM_REFERRAL_COST}
+
+    async def create_room(
+        self,
+        bot_id: int,
+        owner_id: int,
+        visibility: str,
+        max_members: int,
+        settings: dict,
+        duration_minutes: int,
+        password: str | None = None,
+    ) -> dict:
+        bot_id = int(bot_id)
+        owner_id = int(owner_id)
+        max_members = max(2, min(int(max_members), 10000))
         if visibility == RoomVisibility.PRIVATE.value:
             password = (password or "").strip()
             if len(password) < 4:
                 raise ValueError("Las salas privadas requieren una contraseña de al menos 4 caracteres.")
         else:
             password = None
-        return await self.repositories.room.create(bot_id, owner_id, visibility, max_members, settings, max(0, duration_minutes), password)
+
+        lock = self._creation_locks.setdefault((bot_id, owner_id), asyncio.Lock())
+        async with lock:
+            is_admin = owner_id in self.admin_ids
+            referral_cost = 0 if is_admin else self.ROOM_REFERRAL_COST
+            if not is_admin:
+                status = await self.get_creation_status(bot_id, owner_id)
+                available = int(status.get("credits_available", 0))
+                if available < self.ROOM_REFERRAL_COST:
+                    raise InsufficientReferralCredits(available, self.ROOM_REFERRAL_COST)
+
+            # Referral spending is recorded on the room itself. Available credits
+            # are calculated from unique successful referrals minus these rooms,
+            # so a retry after a restart cannot double-charge or restore credits.
+            return await self.repositories.room.create(
+                bot_id,
+                owner_id,
+                visibility,
+                max_members,
+                settings,
+                max(0, int(duration_minutes)),
+                password,
+                referral_cost=referral_cost,
+            )
 
     async def can_manage(self, bot_id: int, room_id: str, user_id: int) -> bool:
         member = await self.repositories.room.member(bot_id, room_id, user_id)

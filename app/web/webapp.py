@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.core.enums import RoomVisibility
 from app.services.webapp_auth import authenticate_webapp_request
+from app.services.room_service import InsufficientReferralCredits
 
 
 class CreateBotBody(BaseModel):
@@ -127,7 +128,8 @@ def build_webapp_router(platform) -> APIRouter:
             rooms = await runtime.ctx.repositories.room.list_for_user(bot_id, uid, 50)
             public = await runtime.ctx.repositories.room.list_public(bot_id, 50)
             profile = await runtime.ctx.repositories.user.get(bot_id, uid) or {"bot_id": bot_id, "user_id": uid}
-            response = {"ok": True, "bot_id": bot_id, "bot_username": runtime.ctx.bot_username, "user_id": uid, "auth_source": source, "profile": profile, "mine": rooms, "public": public}
+            room_creation = await runtime.ctx.services.rooms.get_creation_status(bot_id, uid)
+            response = {"ok": True, "bot_id": bot_id, "bot_username": runtime.ctx.bot_username, "user_id": uid, "auth_source": source, "profile": profile, "room_creation": room_creation, "mine": rooms, "public": public}
             logger.info("mini_app_rooms_ok bot_id=%s user_id=%s auth_source=%s mine=%s public=%s", bot_id, uid, source, len(rooms), len(public))
             return json_safe(response)
         except Exception as exc:
@@ -142,7 +144,8 @@ def build_webapp_router(platform) -> APIRouter:
             raise HTTPException(status_code=401, detail="Mini App no autenticada")
         uid = int(user["id"])
         profile = await runtime.ctx.repositories.user.get(bot_id, uid) or {"bot_id": bot_id, "user_id": uid}
-        return json_safe({"ok": True, "profile": profile})
+        room_creation = await runtime.ctx.services.rooms.get_creation_status(bot_id, uid)
+        return json_safe({"ok": True, "profile": profile, "room_creation": room_creation})
 
     @router.post("/api/child/rooms")
     async def create_room(request: Request, bot_id: int, body: CreateRoomBody):
@@ -157,15 +160,18 @@ def build_webapp_router(platform) -> APIRouter:
         bot_doc = await runtime.ctx.repositories.bots.get(bot_id)
         bot_config = (bot_doc or {}).get("config") or {}
         media_policy = RoomService.normalize_media_policy(bot_config.get("room_media_policy"))
-        room = await runtime.ctx.services.rooms.create_room(
-            bot_id,
-            int(user["id"]),
-            body.visibility,
-            body.max_members,
-            media_policy,
-            body.duration_minutes,
-            body.password,
-        )
+        try:
+            room = await runtime.ctx.services.rooms.create_room(
+                bot_id,
+                int(user["id"]),
+                body.visibility,
+                body.max_members,
+                media_policy,
+                body.duration_minutes,
+                body.password,
+            )
+        except InsufficientReferralCredits as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
         room = dict(room)
         username = (runtime.ctx.bot_username or "").lstrip("@").strip()
         if username and room.get("invite_code"):

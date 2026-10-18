@@ -10,7 +10,7 @@ from datetime import timedelta
 
 
 from app.core.enums import MemberRole, RoomVisibility
-from app.services.room_service import RoomService
+from app.services.room_service import InsufficientReferralCredits, RoomService
 from app.services.bot_lifecycle import botfather_instructions, schedule_label
 
 
@@ -29,7 +29,8 @@ def _menu(ctx, user_id: int) -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton(text="➕ Crear sala", callback_data="room:create"), InlineKeyboardButton(text="🌎 Explorar", callback_data="room:public")],
         [InlineKeyboardButton(text="🏠 Mis salas", callback_data="room:mine"), InlineKeyboardButton(text="🚪 Unirse", callback_data="room:join")],
-        [InlineKeyboardButton(text="👤 Mi perfil", callback_data="profile"), InlineKeyboardButton(text="❓ Ayuda", callback_data="help")],
+        [InlineKeyboardButton(text="👤 Mi perfil", callback_data="profile"), InlineKeyboardButton(text="🎁 Mis referidos", callback_data="referrals:mine")],
+        [InlineKeyboardButton(text="❓ Ayuda", callback_data="help")],
     ]
     if user_id == ctx.owner_id:
         rows.append([InlineKeyboardButton(text="⏱️ Temporizador", callback_data="bot:lifecycle"), InlineKeyboardButton(text="🗑️ Eliminar bot", callback_data="bot:deletehelp")])
@@ -44,6 +45,23 @@ def _room_share_link(ctx, room: dict) -> str | None:
     if not username or len(code) != 7:
         return None
     return f"https://t.me/{username}?start=room_{code}"
+
+
+def _referral_link(ctx, user_id: int) -> str | None:
+    username = (ctx.bot_username or "").lstrip("@").strip()
+    if not username or int(user_id) <= 0:
+        return None
+    return f"https://t.me/{username}?start=ref_{int(user_id)}"
+
+
+def _referral_keyboard(ctx, user_id: int) -> InlineKeyboardMarkup:
+    rows = []
+    link = _referral_link(ctx, user_id)
+    if link:
+        share_url = f"https://t.me/share/url?url={quote(link, safe='')}&text={quote('Únete al bot y ayúdame a desbloquear salas', safe='')}"
+        rows.append([InlineKeyboardButton(text="🔗 Compartir mi enlace", url=share_url)])
+    rows.append([InlineKeyboardButton(text="↩️ Menú", callback_data="home")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def _room_keyboard(ctx, room: dict, member: bool, manageable: bool) -> InlineKeyboardMarkup:
@@ -107,9 +125,12 @@ def build_router(ctx) -> Router:
 
     @router.message(CommandStart())
     async def start(message: Message) -> None:
-        if message.from_user:
-            await ctx.repositories.user.upsert_from_telegram(ctx.bot_id, message.from_user)
         uid = int(message.from_user.id) if message.from_user else 0
+        is_new_user = False
+        if message.from_user:
+            previous_user = await ctx.repositories.user.get(ctx.bot_id, uid)
+            is_new_user = previous_user is None
+            await ctx.repositories.user.upsert_from_telegram(ctx.bot_id, message.from_user)
         parts = (message.text or "").split(maxsplit=1)
         payload = parts[1].strip() if len(parts) > 1 else ""
         if payload.startswith("room_") and uid:
@@ -130,13 +151,23 @@ def build_router(ctx) -> Router:
             else:
                 await message.answer(f"❌ {reason}", reply_markup=_menu(ctx, uid))
             return
+        referral_notice = ""
+        if is_new_user and payload.startswith("ref_") and uid:
+            referrer_raw = payload[4:].strip()
+            if referrer_raw.isdigit():
+                added = await ctx.repositories.referrals.register_referral(ctx.bot_id, int(referrer_raw), uid)
+                if added:
+                    referral_notice = "✅ Tu registro quedó asociado a un enlace de invitación. ¡Gracias por unirte!"
         text = (
             f"<b>🎬 @{html.escape(ctx.bot_username or str(ctx.bot_id))}</b>\n\n"
             "Una plataforma de salas que recopila multimedia y la agrupa en ZIP protegidos con contraseña. Los administradores pueden habilitar vídeos, fotos, archivos, GIF, audio, notas de voz, stickers y álbumes.\n\n"
+            "🎁 <b>Creación de salas:</b> cada sala cuesta 10 referidos válidos. Comparte tu enlace personal desde <b>🎁 Mis referidos</b>; cuenta un usuario nuevo cuando inicia este bot desde tu enlace. Las cuentas incluidas en ADMIN_IDS no gastan referidos.\n\n"
             "📦 <b>Paquetes individuales:</b> cada usuario tiene su propio contador y su propio ZIP. Para habilitar la entrega debe reunir 10 vídeos únicos guardados durante una ventana de 60 minutos. El ZIP se cierra al alcanzar 1,8 GiB o tras 60 segundos sin nuevos archivos, siempre que se cumpla el mínimo.\n\n"
             "🗂️ Cada ZIP final queda archivado en el canal configurado y se envía en privado a quien aportó esos archivos y a los administradores; no se mezcla ni se entrega a los demás miembros.\n\n"
             "🔐 Los originales solo se borran después de descargarse y guardarse correctamente en Vultr."
         )
+        if referral_notice:
+            text = referral_notice + "\n\n" + text
         await message.answer(text, reply_markup=_menu(ctx, int(message.from_user.id)))
         if uid == ctx.owner_id:
             doc = await ctx.repositories.bots.get(ctx.bot_id)
@@ -246,10 +277,50 @@ def build_router(ctx) -> Router:
             reply_markup=_menu(ctx, uid),
         )
 
+    @router.callback_query(F.data == "referrals:mine")
+    async def referrals_mine(callback: CallbackQuery) -> None:
+        await _safe_callback_answer(callback)
+        uid = int(callback.from_user.id)
+        status = await ctx.services.rooms.get_creation_status(ctx.bot_id, uid)
+        link = _referral_link(ctx, uid)
+        if status.get("is_admin"):
+            access = "🛡️ Tu cuenta está en ADMIN_IDS: puedes crear salas sin gastar referidos."
+        else:
+            access = (
+                f"🏠 Crear una sala cuesta <b>10 referidos válidos</b>.\n"
+                f"🎟️ Créditos disponibles: <b>{int(status.get('credits_available', 0))}</b>.\n"
+                f"📌 Cada usuario nuevo que inicie el bot desde tu enlace cuenta una sola vez."
+            )
+        text = (
+            "<b>🎁 MIS REFERIDOS</b>\n\n"
+            f"👥 Usuarios nuevos invitados: <b>{int(status.get('valid_referrals', 0))}</b>\n"
+            f"🏠 Salas pagadas con referidos: <b>{int(status.get('rooms_paid', 0))}</b>\n"
+            f"📉 Créditos gastados: <b>{int(status.get('credits_spent', 0))}</b>\n\n"
+            f"{access}"
+        )
+        if link:
+            text += f"\n\n🔗 Tu enlace personal:\n<code>{html.escape(link)}</code>"
+        await callback.message.edit_text(text, reply_markup=_referral_keyboard(ctx, uid))
+
     @router.callback_query(F.data == "room:create")
     async def create_start(callback: CallbackQuery) -> None:
         await _safe_callback_answer(callback)
         uid = int(callback.from_user.id)
+        quota = await ctx.services.rooms.get_creation_status(ctx.bot_id, uid)
+        if not quota.get("is_admin") and int(quota.get("credits_available", 0)) < 10:
+            missing = 10 - int(quota.get("credits_available", 0))
+            text = (
+                "<b>🔒 Sala bloqueada por referidos</b>\n\n"
+                "Cada sala nueva cuesta 10 referidos válidos. Solo cuentan usuarios nuevos que inicien este bot desde tu enlace personal; cada persona cuenta una vez.\n\n"
+                f"👥 Referidos válidos: <b>{int(quota.get('valid_referrals', 0))}</b>\n"
+                f"🎟️ Créditos disponibles: <b>{int(quota.get('credits_available', 0))}</b>\n"
+                f"📣 Te faltan <b>{missing}</b> créditos para crear una sala."
+            )
+            link = _referral_link(ctx, uid)
+            if link:
+                text += f"\n\n🔗 Tu enlace:\n<code>{html.escape(link)}</code>"
+            await callback.message.edit_text(text, reply_markup=_referral_keyboard(ctx, uid))
+            return
         policy = await _current_media_policy(ctx)
         await ctx.repositories.session.set(ctx.bot_id, uid, "room_create_visibility", {"settings": dict(policy)})
         await callback.message.edit_text(
@@ -451,7 +522,22 @@ def build_router(ctx) -> Router:
         if not data.get("visibility"):
             await _safe_callback_answer(callback, "La sesión expiró", show_alert=True)
             return
-        room = await ctx.services.rooms.create_room(ctx.bot_id, uid, data["visibility"], int(data.get("max_members", 2)), data.get("settings") or RoomService.default_settings(), int(data.get("duration_minutes") or 0), data.get("password"))
+        try:
+            room = await ctx.services.rooms.create_room(ctx.bot_id, uid, data["visibility"], int(data.get("max_members", 2)), data.get("settings") or RoomService.default_settings(), int(data.get("duration_minutes") or 0), data.get("password"))
+        except InsufficientReferralCredits as exc:
+            await _safe_callback_answer(callback, str(exc), show_alert=True)
+            quota = await ctx.services.rooms.get_creation_status(ctx.bot_id, uid)
+            missing = max(0, 10 - int(quota.get("credits_available", 0)))
+            text = (
+                "<b>🔒 No se puede crear la sala todavía</b>\n\n"
+                f"Tienes {int(quota.get('credits_available', 0))} créditos y necesitas 10. Te faltan {missing}.\n"
+                "Comparte tu enlace personal y consigue nuevos usuarios que inicien el bot desde él."
+            )
+            link = _referral_link(ctx, uid)
+            if link:
+                text += f"\n\n🔗 <code>{html.escape(link)}</code>"
+            await callback.message.edit_text(text, reply_markup=_referral_keyboard(ctx, uid))
+            return
         await ctx.repositories.session.clear(ctx.bot_id, uid)
         await ctx.repositories.session.set(ctx.bot_id, uid, "", {"active_room_id": room["room_id"]})
         await ctx.repositories.audit.log(ctx.bot_id, uid, "ROOM_CREATED", target=room["room_id"], details={"visibility": room["visibility"]})
