@@ -5,6 +5,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from aiogram.types import FSInputFile
+
 from app.services.video_thumbnail_pipeline import VideoThumbnailPipeline, jpeg_is_valid_thumbnail
 
 
@@ -15,7 +17,7 @@ def test_default_thumbnail_is_telegram_compatible():
 
 
 @pytest.mark.asyncio
-async def test_video_is_uploaded_once_via_local_file_uri_without_tmp_copy(tmp_path):
+async def test_video_and_thumbnail_are_uploaded_as_multipart_files(tmp_path):
     thumbnail = Path(__file__).resolve().parents[1] / "assets" / "thumb.jpg"
     thumbnail_server_root = tmp_path / "bot-api-data"
     source_file = thumbnail_server_root / "123456" / "source.mp4"
@@ -46,13 +48,11 @@ async def test_video_is_uploaded_once_via_local_file_uri_without_tmp_copy(tmp_pa
             raise AssertionError("No se debe descargar el video por HTTP desde el Bot API local")
 
         async def __call__(self, method, request_timeout=None):
-            # The video stays on the Local Bot API volume; only the thumb is multipart.
             assert request_timeout == 7200
-            # Local Bot API reads the already-stored video directly from its
-            # own absolute file path; only the small default thumbnail is multipart.
-            from urllib.parse import urlparse, unquote
-            assert method.video.startswith("file://")
-            video_path = Path(unquote(urlparse(method.video).path))
+            # Both video and thumbnail are multipart uploads so Telegram reliably
+            # applies the configured custom thumbnail instead of extracting one.
+            assert isinstance(method.video, FSInputFile)
+            video_path = Path(method.video.path)
             assert video_path.exists()
             assert Path(method.thumbnail.path).exists()
             assert video_path.read_bytes() == b"fake-mp4"
@@ -112,12 +112,10 @@ async def test_video_album_upload_uses_default_thumbnail_and_no_captions(tmp_pat
             assert request_timeout == 7200
             assert len(method.media) == 2
             assert all(item.caption is None for item in method.media)
-            video_item = next(item for item in method.media if hasattr(item, "thumbnail"))
+            video_item = next(item for item in method.media if getattr(item, "type", None) == "video" or hasattr(item, "thumbnail"))
             assert Path(video_item.thumbnail.path).exists()
-            assert video_item.media.startswith("file://")
-            from urllib.parse import urlparse, unquote
-            video_path = Path(unquote(urlparse(video_item.media).path))
-            assert video_path.read_bytes() == b"fake-mp4"
+            assert isinstance(video_item.media, FSInputFile)
+            assert Path(video_item.media.path).read_bytes() == b"fake-mp4"
             return [
                 SimpleNamespace(message_id=100, chat=SimpleNamespace(id=-1001234567890), video=None),
                 SimpleNamespace(
@@ -141,3 +139,26 @@ async def test_video_album_upload_uses_default_thumbnail_and_no_captions(tmp_pat
     assert result.message_ids == [100, 101]
     assert result.video_file_ids == ["buffered-video-id"]
     assert not (tmp_path / "ramdisk").exists()
+
+
+@pytest.mark.asyncio
+async def test_file_too_big_error_explains_local_bot_api_requirement():
+    thumbnail = Path(__file__).resolve().parents[1] / "assets" / "thumb.jpg"
+    settings = SimpleNamespace(
+        storage_channel_id="-1001234567890",
+        telegram_api_local_mode=True,
+        telegram_api_server_files_root="/var/lib/telegram-bot-api",
+        telegram_api_host_files_root="/srv/tg-bot-api-data",
+        video_thumbnail_path=str(thumbnail),
+        video_max_upload_bytes=2_000_000_000,
+    )
+
+    class FakeBot:
+        token = "123456:bot-token"
+
+        async def get_file(self, file_id):
+            raise RuntimeError("Telegram server says - Bad Request: file is too big")
+
+    pipeline = VideoThumbnailPipeline(SimpleNamespace(bot_id=123, bot=FakeBot(), settings=settings))
+    with pytest.raises(RuntimeError, match="iniciado con --local"):
+        await pipeline.store_video_once({"file_id": "large-video"})

@@ -9,7 +9,7 @@ from typing import Any
 from aiogram.methods import SendMediaGroup, SendVideo
 from aiogram.types import FSInputFile, InputMediaPhoto, InputMediaVideo
 
-from app.bot.api_client import map_api_file_path, _bot_directory_from_token
+from app.bot.api_client import map_api_file_path
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,13 +89,11 @@ def _chat_id(value: str | int) -> str | int:
 class VideoThumbnailPipeline:
     """Attach the default thumbnail once, then copy buffered messages to members.
 
-    In local Bot API mode, videos already stored in the Bot API data volume are
-    passed to the server with a file:// URI rooted under the numeric bot-ID folder.
-    This avoids copying the entire video to tmpfs and streaming it a second time
-    from the app container.
-    The default thumbnail remains a small multipart upload so Telegram honors it.
-    If the server-side path cannot be trusted/resolved, FSInputFile is used as a
-    slower-but-safe multipart fallback. Room delivery still fails closed on errors.
+    Source files are resolved from the Local Bot API shared data volume, then the
+    video itself and the default thumbnail are uploaded together as multipart files.
+    Telegram documents that a custom thumbnail may be ignored when the video is not
+    uploaded with multipart/form-data, so file:// input is deliberately not used for
+    this step. Room/admin delivery copies only the buffer message created here.
     """
 
     def __init__(self, ctx) -> None:
@@ -129,33 +127,6 @@ class VideoThumbnailPipeline:
             raise RuntimeError("Configuración de miniaturas incompleta: " + ", ".join(issues))
         return Path(self.ctx.settings.video_thumbnail_path).expanduser().resolve()
 
-    def _local_api_path(self, server_file_path: str) -> str | None:
-        """Return a safe absolute path understood inside the Bot API container."""
-        raw_text = str(server_file_path or "").strip()
-        if not raw_text:
-            return None
-        raw = Path(raw_text)
-        if not raw.is_absolute():
-            return None
-        try:
-            server_root = Path(self.ctx.settings.telegram_api_server_files_root).expanduser().resolve(strict=False)
-            resolved = raw.resolve(strict=False)
-            relative = resolved.relative_to(server_root)
-        except (OSError, RuntimeError, ValueError):
-            return None
-        # The official Local Bot API uses the numeric bot user ID as the
-        # directory component, not the full secret token. Pass a file:// URI
-        # so the local API reads the file directly without streaming it from app.
-        try:
-            bot_dir = _bot_directory_from_token(getattr(self.ctx.bot, "token", None))
-        except ValueError:
-            return None
-        if not relative.parts or not bot_dir or relative.parts[0] != bot_dir:
-            return None
-        if any(part in {".", ".."} for part in relative.parts):
-            return None
-        return resolved.as_uri()
-
     async def _resolve_local_video(self, server_file_path: str, file_size_hint: int = 0) -> tuple[Path, int]:
         """Map getFile's server path to a verified host-mounted source file."""
         source_path = map_api_file_path(
@@ -171,17 +142,25 @@ class VideoThumbnailPipeline:
             raise RuntimeError(f"Vídeo de {actual_size} bytes supera VIDEO_MAX_UPLOAD_BYTES={limit}")
         return source_path, actual_size
 
-    def _video_input(self, server_file_path: str, host_path: Path, filename: str) -> str | FSInputFile:
-        local_api_path = self._local_api_path(server_file_path)
-        if local_api_path:
-            return local_api_path
-        # Safe fallback for unexpected path layouts: still upload with a thumbnail.
+    def _video_input(self, host_path: Path, filename: str) -> FSInputFile:
+        # Force multipart for the video itself. Telegram may ignore custom
+        # thumbnails when the video is supplied as a file_id, URL, or file:// URI.
         return FSInputFile(host_path, filename=filename)
 
     async def store_video_once(self, job: dict[str, Any]) -> StoredVideoMessage:
         settings = self.ctx.settings
         thumbnail = self._validate_config()
-        source = await self.ctx.bot.get_file(job["file_id"])
+        try:
+            source = await self.ctx.bot.get_file(job["file_id"])
+        except Exception as exc:
+            if "file is too big" in str(exc).lower():
+                raise RuntimeError(
+                    "getFile rechazó el vídeo como demasiado grande. El bot debe usar el "
+                    "Telegram Bot API local iniciado con --local; TELEGRAM_API_BASE_URL "
+                    "debe apuntar a ese servidor (no a api.telegram.org ni a una instancia "
+                    "del Bot API sin --local)."
+                ) from exc
+            raise
         if not source.file_path:
             raise RuntimeError("Telegram no devolvió file_path para el vídeo")
 
@@ -189,8 +168,8 @@ class VideoThumbnailPipeline:
             source.file_path, int(source.file_size or job.get("file_size") or 0)
         )
         filename = Path(str(job.get("file_name") or "video.mp4")).name or "video.mp4"
-        video_input = self._video_input(source.file_path, source_path, filename)
-        upload_mode = "local_api_file_uri" if isinstance(video_input, str) and video_input.startswith("file://") else "multipart_fallback"
+        video_input = self._video_input(source_path, filename)
+        upload_mode = "multipart_video_and_thumbnail"
         stored = await self.ctx.bot(
             SendVideo(
                 chat_id=_chat_id(settings.storage_channel_id),
@@ -226,11 +205,20 @@ class VideoThumbnailPipeline:
         if not 2 <= len(items) <= 10:
             raise RuntimeError("Telegram requiere álbumes de entre 2 y 10 elementos")
 
-        source_files: dict[int, tuple[Path, int, str]] = {}
+        source_files: dict[int, tuple[Path, int]] = {}
         total_video_bytes = 0
         limit = int(settings.video_max_upload_bytes)
         for item in video_items:
-            source = await self.ctx.bot.get_file(item["file_id"])
+            try:
+                source = await self.ctx.bot.get_file(item["file_id"])
+            except Exception as exc:
+                if "file is too big" in str(exc).lower():
+                    raise RuntimeError(
+                        "getFile rechazó un vídeo del álbum como demasiado grande. "
+                        "El Telegram Bot API local debe ejecutarse con --local y la app "
+                        "debe usar su URL interna."
+                    ) from exc
+                raise
             if not source.file_path:
                 raise RuntimeError("Telegram no devolvió file_path para un vídeo del álbum")
             local_path, size = await self._resolve_local_video(
@@ -241,7 +229,7 @@ class VideoThumbnailPipeline:
                 raise RuntimeError(
                     f"El álbum requiere {total_video_bytes} bytes de vídeo; supera el límite {limit}"
                 )
-            source_files[int(item["message_id"])] = (local_path, size, str(source.file_path))
+            source_files[int(item["message_id"])] = (local_path, size)
 
         upload_media = []
         for item in items:
@@ -252,9 +240,9 @@ class VideoThumbnailPipeline:
             if item.get("type") != "video":
                 raise RuntimeError(f"Tipo no permitido dentro del álbum: {item.get('type')}")
 
-            source_path, _source_size, server_file_path = source_files[message_id]
+            source_path, _source_size = source_files[message_id]
             filename = Path(str(item.get("file_name") or f"video-{message_id}.mp4")).name
-            video_input = self._video_input(server_file_path, source_path, filename)
+            video_input = self._video_input(source_path, filename)
             upload_media.append(InputMediaVideo(
                 media=video_input,
                 thumbnail=FSInputFile(thumbnail, filename=f"thumb-{message_id}.jpg"),
@@ -282,7 +270,7 @@ class VideoThumbnailPipeline:
             if stored_messages[0].chat else _chat_id(settings.storage_channel_id)
         )
         self.logger.info(
-            "video_album_stored_with_thumbnail bot_id=%s source_group=%s buffer_messages=%s video_count=%s bytes=%s upload_mode=local_api_path_or_multipart",
+            "video_album_stored_with_thumbnail bot_id=%s source_group=%s buffer_messages=%s video_count=%s bytes=%s upload_mode=multipart_video_and_thumbnail",
             self.ctx.bot_id, group.get("media_group_id"), len(stored_ids), len(stored_video_ids), total_video_bytes,
         )
         return StoredAlbumMessages(buffer_chat_id, stored_ids, stored_video_ids)

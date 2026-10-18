@@ -30,7 +30,7 @@
 Enviar un video a una sala que tenga al menos otro miembro y consultar inmediatamente:
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.vultr.override.yml logs --since=5m --tail=300 app 2>&1 | grep -Ei 'room_media_queued|room_broadcast_started|room_broadcast_skipped_no_recipients|video_thumbnail_pipeline_unavailable|video_stored_with_thumbnail|video_thumbnail_pipeline_failed_delivery_blocked|room_media_rejected|room_delivery_failed|room_broadcast_completed|room_sender_notice_failed|Traceback|ERROR'
+docker compose -f docker-compose.yml -f docker-compose.vultr.override.yml logs --since=5m --tail=300 app 2>&1 | grep -Ei 'room_media_queued|room_broadcast_started|room_broadcast_skipped_no_recipients|video_thumbnail_pipeline_unavailable|video_stored_with_thumbnail|video_thumbnail_pipeline_failed_delivery_blocked|admin_feed_video_processing_failed_delivery_blocked|admin_feed_video_album_processing_failed_delivery_blocked|room_media_rejected|room_delivery_failed|room_broadcast_completed|room_sender_notice_failed|Traceback|ERROR'
 ```
 
 Interpretación:

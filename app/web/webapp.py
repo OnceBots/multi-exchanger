@@ -26,11 +26,13 @@ class CreateRoomBody(BaseModel):
     visibility: str = Field(default=RoomVisibility.PUBLIC.value)
     max_members: int = Field(default=100, ge=2, le=10000)
     duration_minutes: int = Field(default=0, ge=0, le=43200)
-    allow_photo: bool = True
+    # Legacy clients may still send these fields; the server intentionally ignores
+    # them. Only ADMIN_IDS may change the bot-wide media policy in the bot panel.
+    allow_photo: bool = False
     allow_video: bool = True
-    allow_files: bool = True
-    allow_animation: bool = True
-    allow_albums: bool = True
+    allow_files: bool = False
+    allow_animation: bool = False
+    allow_albums: bool = False
     password: str | None = Field(default=None, min_length=4, max_length=64)
 
 
@@ -150,18 +152,17 @@ def build_webapp_router(platform) -> APIRouter:
             raise HTTPException(status_code=401, detail="Mini App no autenticada")
         if body.visibility not in {RoomVisibility.PUBLIC.value, RoomVisibility.PRIVATE.value}:
             raise HTTPException(status_code=422, detail="Visibilidad inválida")
+        from app.services.room_service import RoomService
+
+        bot_doc = await runtime.ctx.repositories.bots.get(bot_id)
+        bot_config = (bot_doc or {}).get("config") or {}
+        media_policy = RoomService.normalize_media_policy(bot_config.get("room_media_policy"))
         room = await runtime.ctx.services.rooms.create_room(
             bot_id,
             int(user["id"]),
             body.visibility,
             body.max_members,
-            {
-                "allow_photo": body.allow_photo,
-                "allow_video": body.allow_video,
-                "allow_files": body.allow_files,
-                "allow_animation": body.allow_animation,
-                "allow_albums": body.allow_albums,
-            },
+            media_policy,
             body.duration_minutes,
             body.password,
         )

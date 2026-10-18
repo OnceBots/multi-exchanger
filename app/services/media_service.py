@@ -11,6 +11,14 @@ class MediaService:
         self.logger = logging.getLogger(f"media.{ctx.bot_id}")
         self.album_tasks: dict[tuple[str, int, str], asyncio.Task] = {}
 
+    async def _global_media_policy(self) -> dict:
+        """Read the per-child-bot policy changed only by configured ADMIN_IDS."""
+        from app.services.room_service import RoomService
+
+        doc = await self.ctx.repositories.bots.get(self.ctx.bot_id)
+        config = (doc or {}).get("config") or {}
+        return RoomService.normalize_media_policy(config.get("room_media_policy"))
+
     def media_from_message(self, message):
         if message.photo:
             return "photo", message.photo[-1].file_id
@@ -42,7 +50,14 @@ class MediaService:
         if not room_id:
             media_type, file_id = self.media_from_message(message)
             if media_type and self.ctx.admin_feed_queue is not None and message.chat.type == "private":
-                await self.ctx.admin_feed_queue.put({"sender_id": user_id, "media_type": media_type, "file_id": file_id, "caption": None, "direct": True})
+                media_object = message.video or message.document if media_type == "video" else None
+                await self.ctx.admin_feed_queue.put({
+                    "sender_id": user_id, "media_type": media_type, "file_id": file_id,
+                    "message_id": int(message.message_id),
+                    "file_size": int(getattr(media_object, "file_size", 0) or 0),
+                    "file_name": getattr(media_object, "file_name", None),
+                    "caption": None, "direct": True,
+                })
                 await message.answer("ℹ️ Este bot puede procesar mensajes directos para funciones de seguridad y moderación. Para compartir con una comunidad, crea o únete a una sala.")
             else:
                 await message.answer("🏠 Primero crea o únete a una sala para publicar multimedia.")
@@ -56,11 +71,14 @@ class MediaService:
         media_type, file_id = self.media_from_message(message)
         if not media_type:
             return False
-        if not self.rooms.is_media_allowed(room, media_type):
-            await message.answer("🚫 Ese tipo de archivo está deshabilitado en esta sala.")
+        policy = await self._global_media_policy()
+        if not self.rooms.is_media_allowed(room, media_type, policy):
+            await message.answer("🚫 Este bot solo permite vídeos por ahora. Las demás opciones deben habilitarlas los administradores del bot.")
             return False
-
         if message.media_group_id and media_type in {"photo", "video"}:
+            if not policy.get("allow_albums", False):
+                await message.answer("🚫 Los álbumes están deshabilitados por los administradores de este bot.")
+                return False
             media_object = (
                 message.photo[-1] if media_type == "photo"
                 else (message.video or message.document)
@@ -108,10 +126,14 @@ class MediaService:
         )
         await self.ctx.broadcast_queue.put(queued_job)
         if self.ctx.admin_feed_queue is not None:
+            media_object = message.video or message.document if media_type == "video" else None
             await self.ctx.admin_feed_queue.put({
                 "sender_id": user_id,
                 "media_type": media_type,
                 "file_id": file_id,
+                "message_id": int(message.message_id),
+                "file_size": int(getattr(media_object, "file_size", 0) or 0),
+                "file_name": getattr(media_object, "file_name", None),
                 # Admin moderation feed is multimedia-only: no caption is needed.
                 "caption": None,
             })
@@ -127,7 +149,10 @@ class MediaService:
             await self.ctx.album_queue.put({"room_id": room_id, "group": group})
             if group.get("items"):
                 first = sorted(group["items"], key=lambda x: int(x.get("message_id", 0)))[0]
-                await self.ctx.admin_feed_queue.put({"sender_id": sender_id, "media_type": "album", "file_id": first.get("file_id"), "caption": None, "group": group})
+                await self.ctx.admin_feed_queue.put({
+                    "sender_id": sender_id, "media_type": "album", "file_id": first.get("file_id"),
+                    "message_id": int(first.get("message_id", 0)), "caption": None, "group": group,
+                })
         except asyncio.CancelledError:
             raise
         except Exception:

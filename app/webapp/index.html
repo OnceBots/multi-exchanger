@@ -27,7 +27,7 @@
         <div class="hero-copy">
           <span class="pill success" id="connectionPill">● Conectando</span>
           <h2>Tu espacio para compartir contenido.</h2>
-          <p>Explora salas, crea comunidades y comparte multimedia de forma rápida y anónima.</p>
+          <p>Explora salas y comparte vídeos de forma rápida y anónima. Los demás formatos dependen de los administradores del bot.</p>
         </div>
         <div class="hero-actions">
           <button class="primary" data-go="create">＋ Crear sala</button>
@@ -38,7 +38,7 @@
       <div id="homeRooms" class="room-grid"></div>
       <div class="feature-grid">
         <button class="feature-card glass" data-go="mine"><span>🏠</span><strong>Mis salas</strong><small>Comunidades que ya sigues</small></button>
-        <button class="feature-card glass" data-go="create"><span>✨</span><strong>Crear comunidad</strong><small>Configura permisos y expiración</small></button>
+        <button class="feature-card glass" data-go="create"><span>✨</span><strong>Crear comunidad</strong><small>Configura la privacidad y expiración</small></button>
         <button class="feature-card glass" id="openHelp"><span>📖</span><strong>Manual</strong><small>Aprende cómo funciona</small></button>
       </div>
     </section>
@@ -64,14 +64,7 @@
           <label>Capacidad<input id="roomMax" type="number" min="1" value="100"></label>
         </div>
         <label>Duración<select id="roomDuration"><option value="0">♾️ Sin expiración</option><option value="10">10 minutos</option><option value="30">30 minutos</option><option value="60">1 hora</option><option value="360">6 horas</option><option value="720">12 horas</option><option value="1440">24 horas</option><option value="10080">7 días</option></select></label>
-        <div class="subsection-title">Permisos multimedia</div>
-        <div class="toggle-grid">
-          <button class="toggle on" data-toggle="allow_photo">📸 Fotos</button>
-          <button class="toggle on" data-toggle="allow_video">🎬 Vídeos</button>
-          <button class="toggle on" data-toggle="allow_files">📎 Archivos</button>
-          <button class="toggle on" data-toggle="allow_albums">🖼️ Álbumes</button>
-          <button class="toggle on full" data-toggle="anonymous_media">🕶️ Anonimato de identidad</button>
-        </div>
+        <div class="panel-sub">Por defecto las salas solo aceptan vídeos. Los administradores del bot pueden habilitar fotos, archivos, GIF y álbumes desde 🛡️ Moderación.</div>
         <button class="primary wide" id="createRoomBtn">Crear sala ahora</button>
       </div>
     </section>

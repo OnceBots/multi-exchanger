@@ -14,12 +14,12 @@
 1. El bot recibe el vídeo y resuelve `getFile` a la ruta que devolvió el Bot API local.
 2. El Bot API local organiza los ficheros bajo un directorio con el **ID numérico del bot**. No se utiliza el token secreto como nombre de carpeta.
 3. La app valida que la ruta y el fichero existan dentro del volumen compartido y estén dentro del directorio del bot correspondiente.
-4. Cuando la ruta local se puede validar, la app envía al Bot API un URI `file://` para que el propio servidor lea el vídeo de su disco. Esto evita copiar el vídeo completo a tmpfs y volver a transferirlo entre contenedores.
-5. La miniatura predeterminada sigue siendo un `FSInputFile` pequeño multipart. Telegram ignora las miniaturas personalizadas cuando no se cargan mediante multipart/form-data.
+4. La app resuelve la ruta local del vídeo en el volumen compartido y comprueba tamaño, existencia y directorio numérico del bot.
+5. El vídeo **y** la miniatura se envían juntos como `FSInputFile` multipart al canal buffer. Telegram documenta que puede ignorar una miniatura personalizada si el vídeo no se carga mediante multipart/form-data; por eso el pipeline final no usa `file://` para el campo `video`. Esto transfiere el contenido por la red privada Docker, pero hace fiable la miniatura personalizada.
 6. El vídeo se almacena una sola vez en el canal buffer. Los miembros reciben una copia de ese mensaje; el código no tiene un fallback que publique el vídeo directo sin miniatura.
 7. Si configuración, ruta, publicación en buffer o entrega fallan, el vídeo se bloquea. Se genera un log explicativo y el emisor recibe un aviso privado si el bot puede contactarlo.
 
-El pipeline optimizado no necesita copiar todo el vídeo a `/mnt/ramdisk`. Las variables antiguas `VIDEO_RAMDISK_PATH` y `VIDEO_REQUIRE_TMPFS` se mantienen por compatibilidad con el despliegue, pero no son un requisito de esta ruta de envío rápida.
+El pipeline no necesita copiar el vídeo a `/mnt/ramdisk`; lee el fichero del volumen compartido y lo transmite como multipart dentro de la red privada Docker. Las variables antiguas `VIDEO_RAMDISK_PATH` y `VIDEO_REQUIRE_TMPFS` se mantienen por compatibilidad.
 
 ## Salas y feed de administración
 

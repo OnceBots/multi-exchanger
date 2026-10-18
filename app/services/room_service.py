@@ -35,15 +35,39 @@ class RoomService:
     async def leave(self, bot_id: int, room_id: str, user_id: int) -> tuple[bool, str]:
         return await self.repositories.room.leave(bot_id, room_id, user_id)
 
-    @staticmethod
-    def default_settings() -> dict:
-        return {"allow_photo": True, "allow_video": True, "allow_files": True, "allow_animation": True, "allow_albums": True}
+    MEDIA_POLICY_KEYS = ("allow_video", "allow_photo", "allow_files", "allow_animation", "allow_albums")
 
     @staticmethod
-    def is_media_allowed(room: dict, media_type: str) -> bool:
-        settings = room.get("settings") or {}
+    def default_media_policy() -> dict:
+        """Safe bot-wide policy: rooms publish videos only until a bot admin opts in."""
+        return {
+            "allow_video": True,
+            "allow_photo": False,
+            "allow_files": False,
+            "allow_animation": False,
+            "allow_albums": False,
+        }
+
+    @classmethod
+    def normalize_media_policy(cls, value: dict | None) -> dict:
+        defaults = cls.default_media_policy()
+        value = value if isinstance(value, dict) else {}
+        return {key: bool(value.get(key, defaults[key])) for key in cls.MEDIA_POLICY_KEYS}
+
+    @classmethod
+    def default_settings(cls) -> dict:
+        # Retained in room documents for compatibility. New rooms inherit the
+        # current bot-wide media policy; authorization is still enforced globally.
+        return cls.default_media_policy()
+
+    @classmethod
+    def is_media_allowed(cls, room: dict, media_type: str, policy: dict | None = None) -> bool:
+        """Apply the bot-admin-controlled policy; legacy room settings never bypass it."""
+        policy = cls.normalize_media_policy(policy)
         key = {"photo": "allow_photo", "video": "allow_video", "document": "allow_files", "animation": "allow_animation"}.get(media_type)
-        return bool(key is None or settings.get(key, True))
+        if key is None or not policy.get(key, False):
+            return False
+        return True
 
     @staticmethod
     def public_label(room: dict) -> str:

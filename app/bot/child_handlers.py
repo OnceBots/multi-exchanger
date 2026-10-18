@@ -62,6 +62,13 @@ def _room_keyboard(ctx, room: dict, member: bool, manageable: bool) -> InlineKey
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+
+async def _current_media_policy(ctx) -> dict:
+    """Load the durable per-child-bot media policy controlled by ADMIN_IDS."""
+    doc = await ctx.repositories.bots.get(ctx.bot_id)
+    config = (doc or {}).get("config") or {}
+    return RoomService.normalize_media_policy(config.get("room_media_policy"))
+
 def _room_text(room: dict) -> str:
     visibility = "🌎 Pública" if room.get("visibility") == RoomVisibility.PUBLIC.value else "🔒 Privada"
     expiry = room.get("expires_at")
@@ -84,22 +91,6 @@ def _room_list(rooms: list[dict], prefix: str = "open") -> InlineKeyboardMarkup:
         label = f"{room.get('member_count', 0)} 👥 · {str(room.get('invite_code') or room.get('name') or 'Sala').upper()}"
         rows.append([InlineKeyboardButton(text=label[:45], callback_data=f"room:{prefix}:{room['room_id']}")])
     rows.append([InlineKeyboardButton(text="↩️ Menú", callback_data="home")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def _settings_keyboard(data: dict) -> InlineKeyboardMarkup:
-    settings = data.get("settings") or RoomService.default_settings()
-    labels = {
-        "allow_photo": "📷 Fotos",
-        "allow_video": "🎬 Vídeos",
-        "allow_files": "📎 Archivos",
-        "allow_animation": "🎞 GIF",
-        "allow_albums": "🖼️ Álbumes",
-    }
-    rows = []
-    for key, label in labels.items():
-        rows.append([InlineKeyboardButton(text=f"{'✅' if settings.get(key, True) else '❌'} {label}", callback_data=f"roomcreate:toggle:{key}")])
-    rows.append([InlineKeyboardButton(text="Continuar ➜", callback_data="roomcreate:settings_done")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -141,7 +132,7 @@ def build_router(ctx) -> Router:
             return
         text = (
             f"<b>🎬 @{html.escape(ctx.bot_username or str(ctx.bot_id))}</b>\n\n"
-            "Una plataforma de salas para compartir fotos, vídeos, archivos, GIF y álbumes.\n\n"
+            "Una plataforma de salas para compartir vídeos. Los administradores pueden habilitar fotos, archivos, GIF y álbumes.\n\n"
             "🔐 <b>Privacidad:</b> las publicaciones de las salas se redistribuyen de forma anónima; el servicio puede procesar contenido para funciones de moderación y seguridad."
         )
         await message.answer(text, reply_markup=_menu(ctx, int(message.from_user.id)))
@@ -210,9 +201,9 @@ def build_router(ctx) -> Router:
             "<b>❓ Ayuda</b>\n\n"
             "• Crea o únete a una sala.\n"
             "• Elige la sala activa desde <b>Mis salas</b>.\n"
-            "• Envía una foto, vídeo, documento, GIF o álbum.\n"
+            "• Envía vídeos. Otros formatos solo están disponibles cuando los habilita un administrador del bot.\n"
             "• El contenido se distribuye a los demás miembros sin mostrar tu identidad.\n\n"
-            "Los propietarios y administradores pueden gestionar miembros y configuración.",
+            "Los administradores incluidos en ADMIN_IDS controlan los formatos multimedia desde 🛡️ Moderación.",
             reply_markup=_menu(ctx, int(message.from_user.id)),
         )
 
@@ -228,7 +219,7 @@ def build_router(ctx) -> Router:
     async def help_callback(callback: CallbackQuery) -> None:
         await _safe_callback_answer(callback)
         await callback.message.edit_text(
-            "<b>❓ Cómo funciona</b>\n\n1. Crea o únete a una sala.\n2. Selecciona una sala activa.\n3. Envía multimedia.\n4. La plataforma la distribuye al resto de la sala.\n\nLa identidad del emisor no se muestra a los miembros.",
+            "<b>❓ Cómo funciona</b>\n\n1. Crea o únete a una sala.\n2. Selecciona una sala activa.\n3. Envía vídeos.\n4. La plataforma los procesa con la miniatura y los distribuye al resto de la sala.\n\nPor defecto solo se permiten vídeos; los IDs configurados en ADMIN_IDS pueden habilitar fotos, archivos, GIF y álbumes desde 🛡️ Moderación. La identidad del emisor no se muestra a los miembros.",
             reply_markup=_menu(ctx, int(callback.from_user.id)),
         )
 
@@ -254,7 +245,8 @@ def build_router(ctx) -> Router:
     async def create_start(callback: CallbackQuery) -> None:
         await _safe_callback_answer(callback)
         uid = int(callback.from_user.id)
-        await ctx.repositories.session.set(ctx.bot_id, uid, "room_create_visibility", {"settings": RoomService.default_settings()})
+        policy = await _current_media_policy(ctx)
+        await ctx.repositories.session.set(ctx.bot_id, uid, "room_create_visibility", {"settings": dict(policy)})
         await callback.message.edit_text(
             "<b>➕ Crear sala</b>\n\n"
             "🔐 El sistema generará automáticamente un <b>código aleatorio de 7 caracteres</b>.\n"
@@ -336,7 +328,7 @@ def build_router(ctx) -> Router:
             return
         await ctx.repositories.session.set(ctx.bot_id, int(callback.from_user.id), "", {"active_room_id": room_id})
         await _safe_callback_answer(callback, "✅ Sala activa")
-        await callback.message.answer("📡 Sala activa. Envía ahora una foto, vídeo, documento, GIF o álbum.")
+        await callback.message.answer("📡 Sala activa. Envía ahora un vídeo. Otros formatos dependen de los permisos globales del bot.")
 
     @router.callback_query(F.data.startswith("room:leave:"))
     async def leave_room(callback: CallbackQuery) -> None:
@@ -411,28 +403,6 @@ def build_router(ctx) -> Router:
         await _safe_callback_answer(callback, "Expiración desactivada")
         await show_room(callback, room_id)
 
-    @router.callback_query(F.data == "roomcreate:settings_done")
-    async def settings_done(callback: CallbackQuery) -> None:
-        uid = int(callback.from_user.id)
-        session = await ctx.repositories.session.get(ctx.bot_id, uid)
-        data = (session or {}).get("data", {})
-        await ctx.repositories.session.set(ctx.bot_id, uid, "room_create_duration", data)
-        await _safe_callback_answer(callback)
-        await callback.message.edit_text("⏳ ¿Cuánto tiempo estará activa la sala?", reply_markup=_duration_keyboard())
-
-    @router.callback_query(F.data.startswith("roomcreate:toggle:"))
-    async def settings_toggle(callback: CallbackQuery) -> None:
-        uid = int(callback.from_user.id)
-        key = callback.data.split(":", 2)[2]
-        session = await ctx.repositories.session.get(ctx.bot_id, uid)
-        data = dict((session or {}).get("data") or {})
-        settings = dict(data.get("settings") or RoomService.default_settings())
-        settings[key] = not bool(settings.get(key, True))
-        data["settings"] = settings
-        await ctx.repositories.session.set(ctx.bot_id, uid, "room_create_settings", data)
-        await callback.message.edit_reply_markup(reply_markup=_settings_keyboard(data))
-        await _safe_callback_answer(callback, "Actualizado")
-
     @router.callback_query(F.data.startswith("roomcreate:visibility:"))
     async def create_visibility(callback: CallbackQuery) -> None:
         uid = int(callback.from_user.id)
@@ -497,15 +467,56 @@ def build_router(ctx) -> Router:
             return
         enabled = await ctx.repositories.admin_feed.is_enabled(ctx.bot_id, uid)
         status = "🟢 ACTIVO" if enabled else ("🟢 ACTIVO (predeterminado)" if ctx.settings.admin_feed_enabled_by_default else "⚪ INACTIVO")
+        policy = await _current_media_policy(ctx)
+        labels = {
+            "allow_video": "🎬 Vídeos",
+            "allow_photo": "📷 Fotos",
+            "allow_files": "📎 Archivos",
+            "allow_animation": "🎞 GIF",
+            "allow_albums": "🖼️ Álbumes",
+        }
+        media_rows = [
+            [InlineKeyboardButton(
+                text=f"{'✅' if policy[key] else '❌'} {label}",
+                callback_data=f"adminmedia:toggle:{key}",
+            )]
+            for key, label in labels.items()
+        ]
         await callback.message.edit_text(
-            "<b>🛡️ Moderación</b>\n\n"
+            "<b>🛡️ Administración del bot</b>\n\n"
             f"Feed de moderación: <b>{status}</b>\n\n"
-            "El feed permite revisar el contenido recibido por el bot para tareas de seguridad/moderación.",
+            "<b>Formatos permitidos en TODAS las salas</b>\n"
+            "Por defecto solo se permiten vídeos. Estos interruptores solo los pueden usar los IDs de ADMIN_IDS. "
+            "Los cambios se aplican también a salas existentes.\n\n"
+            "El feed envía los vídeos solo después de procesarlos con la miniatura configurada.",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔛 Activar", callback_data="adminfeed:on"), InlineKeyboardButton(text="⛔ Desactivar", callback_data="adminfeed:off")],
+                [InlineKeyboardButton(text="🔛 Activar feed", callback_data="adminfeed:on"), InlineKeyboardButton(text="⛔ Desactivar feed", callback_data="adminfeed:off")],
+                *media_rows,
                 [InlineKeyboardButton(text="↩️ Menú", callback_data="home")],
             ]),
         )
+
+    @router.callback_query(F.data.startswith("adminmedia:toggle:"))
+    async def admin_media_toggle(callback: CallbackQuery) -> None:
+        uid = int(callback.from_user.id)
+        if uid not in ctx.settings.admin_ids:
+            await _safe_callback_answer(callback, "Solo ADMIN_IDS puede cambiar los permisos multimedia.", show_alert=True)
+            return
+        key = callback.data.rsplit(":", 1)[-1]
+        if key not in RoomService.MEDIA_POLICY_KEYS:
+            await _safe_callback_answer(callback, "Opción inválida", show_alert=True)
+            return
+        policy = await _current_media_policy(ctx)
+        policy[key] = not policy[key]
+        # Prevent disabling videos as the sole medium unless admin intentionally
+        # disables them; that would leave rooms with no publishable media.
+        await ctx.repositories.bots.update_config(ctx.bot_id, {"room_media_policy": policy})
+        await ctx.repositories.audit.log(
+            ctx.bot_id, uid, "ROOM_MEDIA_POLICY_UPDATED", target=key,
+            details={"enabled": policy[key], "policy": policy},
+        )
+        await _safe_callback_answer(callback, "Permisos multimedia actualizados")
+        await admin_panel(callback)
 
     @router.callback_query(F.data == "adminfeed:on")
     async def admin_feed_on(callback: CallbackQuery) -> None:
@@ -579,8 +590,10 @@ def build_router(ctx) -> Router:
                     await message.answer("La capacidad debe estar entre 2 y 10000.")
                     return
                 data["max_members"] = max_members
-                await ctx.repositories.session.set(ctx.bot_id, uid, "room_create_settings", data)
-                await message.answer("🎛 Permisos multimedia:", reply_markup=_settings_keyboard(data))
+                # Multimedia permissions are controlled globally from the Admin
+                # panel, never by regular room creators.
+                await ctx.repositories.session.set(ctx.bot_id, uid, "room_create_duration", data)
+                await message.answer("⏳ ¿Cuánto tiempo estará activa la sala?", reply_markup=_duration_keyboard())
                 return
         if message.photo or message.video or message.document or message.animation:
             await ctx.services.media.handle_message(message)
