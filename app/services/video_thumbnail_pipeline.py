@@ -87,13 +87,13 @@ def _chat_id(value: str | int) -> str | int:
 
 
 class VideoThumbnailPipeline:
-    """Attach the default thumbnail once, then copy buffered messages to members.
+    """Apply the brand image as the visible video cover, then copy the buffer message.
 
-    Source files are resolved from the Local Bot API shared data volume, then the
-    video itself and the default thumbnail are uploaded together as multipart files.
-    Telegram documents that a custom thumbnail may be ignored when the video is not
-    uploaded with multipart/form-data, so file:// input is deliberately not used for
-    this step. Room/admin delivery copies only the buffer message created here.
+    The source video is loaded from the Local Bot API shared volume. Both the legacy
+    ``thumbnail`` metadata and the visible ``cover`` are uploaded as multipart files.
+    Telegram may generate/ignore ``thumbnail`` for videos; ``cover`` is the explicit
+    cover parameter that controls the image displayed on the video message. Room and
+    admin delivery copy only the buffer message created here.
     """
 
     def __init__(self, ctx) -> None:
@@ -143,8 +143,9 @@ class VideoThumbnailPipeline:
         return source_path, actual_size
 
     def _video_input(self, host_path: Path, filename: str) -> FSInputFile:
-        # Force multipart for the video itself. Telegram may ignore custom
-        # thumbnails when the video is supplied as a file_id, URL, or file:// URI.
+        # Force multipart for the video itself; the caller attaches both thumbnail
+        # and cover as multipart files. A custom visible cover requires Bot API support
+        # for the `cover` parameter (Bot API 8.3+).
         return FSInputFile(host_path, filename=filename)
 
     async def store_video_once(self, job: dict[str, Any]) -> StoredVideoMessage:
@@ -169,14 +170,17 @@ class VideoThumbnailPipeline:
         )
         filename = Path(str(job.get("file_name") or "video.mp4")).name or "video.mp4"
         video_input = self._video_input(source_path, filename)
-        upload_mode = "multipart_video_and_thumbnail"
+        upload_mode = "multipart_video_thumbnail_and_cover"
         stored = await self.ctx.bot(
             SendVideo(
                 chat_id=_chat_id(settings.storage_channel_id),
                 video=video_input,
-                # Keep this as InputFile/multipart; Telegram ignores thumbnails
-                # supplied as a plain file_id or when not uploaded as a file.
+                # `thumbnail` may be ignored in favor of a server-generated frame.
+                # `cover` sets the visible message cover. Both are uploaded with the
+                # video via multipart; the cover uses an API parameter available in
+                # Telegram Bot API 8.3 and newer.
                 thumbnail=FSInputFile(thumbnail, filename="thumb.jpg"),
+                cover=FSInputFile(thumbnail, filename="cover.jpg"),
                 caption=None,
                 supports_streaming=True,
             ),
@@ -185,7 +189,7 @@ class VideoThumbnailPipeline:
         if not stored.video or not stored.video.file_id:
             raise RuntimeError("El canal buffer no devolvió un file_id del vídeo")
         self.logger.info(
-            "video_stored_with_thumbnail bot_id=%s source_message_id=%s buffer_message_id=%s bytes=%s upload_mode=%s storage_channel_id=%s",
+            "video_stored_with_thumbnail_and_cover bot_id=%s source_message_id=%s buffer_message_id=%s bytes=%s upload_mode=%s storage_channel_id=%s",
             self.ctx.bot_id, job.get("message_id"), stored.message_id, byte_size, upload_mode, settings.storage_channel_id,
         )
         return StoredVideoMessage(
@@ -246,6 +250,7 @@ class VideoThumbnailPipeline:
             upload_media.append(InputMediaVideo(
                 media=video_input,
                 thumbnail=FSInputFile(thumbnail, filename=f"thumb-{message_id}.jpg"),
+                cover=FSInputFile(thumbnail, filename=f"cover-{message_id}.jpg"),
                 caption=None,
                 supports_streaming=True,
             ))
@@ -270,7 +275,7 @@ class VideoThumbnailPipeline:
             if stored_messages[0].chat else _chat_id(settings.storage_channel_id)
         )
         self.logger.info(
-            "video_album_stored_with_thumbnail bot_id=%s source_group=%s buffer_messages=%s video_count=%s bytes=%s upload_mode=multipart_video_and_thumbnail",
+            "video_album_stored_with_thumbnail_and_cover bot_id=%s source_group=%s buffer_messages=%s video_count=%s bytes=%s upload_mode=multipart_video_thumbnail_and_cover",
             self.ctx.bot_id, group.get("media_group_id"), len(stored_ids), len(stored_video_ids), total_video_bytes,
         )
         return StoredAlbumMessages(buffer_chat_id, stored_ids, stored_video_ids)

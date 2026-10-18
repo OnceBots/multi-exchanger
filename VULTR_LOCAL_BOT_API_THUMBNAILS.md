@@ -8,6 +8,7 @@
 - En Vultr, el override fija `TELEGRAM_API_SERVER_FILES_ROOT=/var/lib/telegram-bot-api`, que es el destino observado del montaje del contenedor `tg-local-api`.
 - `TELEGRAM_API_HOST_FILES_ROOT=/srv/tg-bot-api-data` es el mismo volumen visto desde el contenedor `app`; no uses la ruta host `/root/tg-bot-api/data` dentro de la app.
 - `VIDEO_THUMBNAIL_PATH` debe ser un JPEG válido, menor de 200 KB y de hasta 320x320 px.
+- El servidor Telegram Bot API local debe ser compatible con el parámetro `cover` (Bot API 8.3 o posterior) para mostrar la imagen de marca como portada visible del vídeo.
 
 ## Cómo procesa los vídeos
 
@@ -15,9 +16,9 @@
 2. La ruta real del servidor mostrado en el despliegue tiene la forma `<directorio-de-datos>/<TOKEN_DEL_BOT>/videos/...`. Otras distribuciones pueden usar el ID numérico. El mapeo admite ambos formatos, pero solo dentro del directorio correspondiente al bot que está procesando el mensaje.
 3. La app traduce la ruta absoluta desde `/var/lib/telegram-bot-api` a `/srv/tg-bot-api-data`, comprueba que el fichero exista y verifica que permanezca dentro del directorio del bot.
 4. La app valida el tamaño y existencia del vídeo antes de procesarlo. Los tokens nunca se escriben en los mensajes de error.
-5. El vídeo **y** la miniatura se envían juntos como `FSInputFile` multipart al canal buffer. Telegram documenta que puede ignorar una miniatura personalizada si el vídeo no se carga mediante multipart/form-data; por eso el pipeline final no usa `file://` para el campo `video`. Esto transfiere el contenido por la red privada Docker, pero hace fiable la miniatura personalizada.
-6. El vídeo se almacena una sola vez en el canal buffer. Los miembros reciben una copia de ese mensaje; el código no tiene un fallback que publique el vídeo directo sin miniatura.
-7. Si configuración, ruta, publicación en buffer o entrega fallan, el vídeo se bloquea. Se genera un log explicativo y el emisor recibe un aviso privado si el bot puede contactarlo.
+5. El vídeo, el parámetro heredado `thumbnail` y el parámetro `cover` se cargan juntos como `FSInputFile` multipart al canal buffer. `thumbnail` puede ser reemplazada por un fotograma generado en el servidor; `cover` es la portada visible del mensaje y requiere Bot API 8.3 o posterior. Por eso el pipeline no usa `file_id`/`file://` para el archivo que se publica en buffer.
+6. El vídeo se almacena una sola vez en el canal buffer. Las salas y el feed del administrador reciben una copia de ese mensaje ya procesado; el código no tiene un fallback que publique el vídeo directo sin portada procesada.
+7. Si la configuración, la ruta, la publicación en buffer o la entrega fallan, el vídeo se bloquea. Se genera un log explicativo y el emisor recibe un aviso privado si el bot puede contactarlo.
 
 El pipeline no necesita copiar el vídeo a `/mnt/ramdisk`; lee el fichero del volumen compartido y lo transmite como multipart dentro de la red privada Docker. Las variables antiguas `VIDEO_RAMDISK_PATH` y `VIDEO_REQUIRE_TMPFS` se mantienen por compatibilidad.
 
@@ -41,5 +42,6 @@ Interpretación:
 - `room_broadcast_skipped_no_recipients`: no hay otros miembros activos (el emisor se excluye de la distribución).
 - `video_thumbnail_pipeline_unavailable`: revisar ajustes globales, canal buffer y miniatura predeterminada.
 - `video_thumbnail_pipeline_failed_delivery_blocked`: revisar el traceback posterior; suele revelar el error al mapear el archivo, el permiso de publicación en el canal buffer o el formato de miniatura.
-- `video_stored_with_thumbnail`: el vídeo llegó al buffer con la miniatura adjunta; a continuación el log de broadcast debe indicar entregas a miembros.
+- `video_stored_with_thumbnail_and_cover`: el vídeo llegó al buffer con el cover personalizado enviado; luego el log de broadcast debe indicar las entregas. Si el mensaje muestra un fotograma del contenido en vez del diseño de marca, revisá que `tg-local-api` use una versión de Bot API 8.3 o posterior.
+- `video_stored_with_thumbnail`: marcador compatible con versiones anteriores del log.
 - `room_delivery_failed` o `room_broadcast_completed ... failed=N`: Telegram rechazó alguna entrega (por ejemplo, el destinatario no inició el bot o lo bloqueó).

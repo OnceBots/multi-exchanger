@@ -1,5 +1,10 @@
 # Changelog
 
+## Video cover fix V6
+- Se cambia el envío del diseño de marca desde solo `thumbnail` a `thumbnail` + `cover`. Telegram puede ignorar `thumbnail` y generar un fotograma propio; `cover` es la portada visible de los vídeos.
+- Los vídeos individuales y los vídeos de álbumes se cargan al canal buffer con ambos campos vía multipart y luego las salas/feed de administración copian ese mensaje procesado.
+- Requiere un Telegram Bot API local compatible con `cover` (Bot API 8.3 o posterior).
+
 ## Archived bot recovery and media-only rooms
 - Se pueden recuperar bots hijos archivados enviando su token validado desde el Master; se conserva el propietario, la configuración no relacionada con el ciclo de vida y los datos asociados. Solo el propietario original o un administrador puede reactivarlos.
 - Se renuevan de forma segura el token cifrado y el secreto del webhook al reactivar, y se mantiene el rechazo de IDs activos duplicados.

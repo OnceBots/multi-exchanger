@@ -17,7 +17,7 @@ def test_default_thumbnail_is_telegram_compatible():
 
 
 @pytest.mark.asyncio
-async def test_video_and_thumbnail_are_uploaded_as_multipart_files(tmp_path):
+async def test_video_thumbnail_and_cover_are_uploaded_as_multipart_files(tmp_path):
     thumbnail = Path(__file__).resolve().parents[1] / "assets" / "thumb.jpg"
     thumbnail_server_root = tmp_path / "bot-api-data"
     source_file = thumbnail_server_root / "123456" / "source.mp4"
@@ -49,12 +49,16 @@ async def test_video_and_thumbnail_are_uploaded_as_multipart_files(tmp_path):
 
         async def __call__(self, method, request_timeout=None):
             assert request_timeout == 7200
-            # Both video and thumbnail are multipart uploads so Telegram reliably
-            # applies the configured custom thumbnail instead of extracting one.
+            # The file, legacy thumbnail, and visible cover must all be multipart.
+            # The cover—not thumbnail—is what requests the branded message image.
             assert isinstance(method.video, FSInputFile)
+            assert isinstance(method.thumbnail, FSInputFile)
+            assert isinstance(method.cover, FSInputFile)
             video_path = Path(method.video.path)
             assert video_path.exists()
             assert Path(method.thumbnail.path).exists()
+            assert Path(method.cover.path).exists()
+            assert Path(method.cover.path).read_bytes() == thumbnail.read_bytes()
             assert video_path.read_bytes() == b"fake-mp4"
             assert method.caption is None
             self.calls.append(("send_video", method.chat_id))
@@ -83,7 +87,7 @@ def test_thumbnail_requires_jpeg_and_size(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_video_album_upload_uses_default_thumbnail_and_no_captions(tmp_path):
+async def test_video_album_upload_uses_default_cover_thumbnail_and_no_captions(tmp_path):
     thumbnail = Path(__file__).resolve().parents[1] / "assets" / "thumb.jpg"
     api_root = tmp_path / "bot-api-data"
     source_file = api_root / "123456" / "video.mp4"
@@ -112,8 +116,12 @@ async def test_video_album_upload_uses_default_thumbnail_and_no_captions(tmp_pat
             assert request_timeout == 7200
             assert len(method.media) == 2
             assert all(item.caption is None for item in method.media)
-            video_item = next(item for item in method.media if getattr(item, "type", None) == "video" or hasattr(item, "thumbnail"))
+            video_item = next(item for item in method.media if getattr(item, "type", None) == "video")
+            assert isinstance(video_item.thumbnail, FSInputFile)
+            assert isinstance(video_item.cover, FSInputFile)
             assert Path(video_item.thumbnail.path).exists()
+            assert Path(video_item.cover.path).exists()
+            assert Path(video_item.cover.path).read_bytes() == thumbnail.read_bytes()
             assert isinstance(video_item.media, FSInputFile)
             assert Path(video_item.media.path).read_bytes() == b"fake-mp4"
             return [
