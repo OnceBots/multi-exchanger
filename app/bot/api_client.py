@@ -8,21 +8,24 @@ from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.telegram import SimpleFilesPathWrapper, TelegramAPIServer
 
 
-def _bot_directory_from_token(token: str | None) -> str | None:
-    """Return Telegram's numeric bot-ID data directory, never the secret token.
+def _bot_directories_from_token(token: str | None) -> tuple[str, ...]:
+    """Return accepted on-disk directory names for a bot, without logging them.
 
-    The official local Bot API stores files under a directory named for the bot
-    user ID (the numeric prefix before ``:``), not under the complete token.
+    Bot API builds/deployments can store a bot's files under either the full
+    token directory or the numeric bot-ID directory. The full token stays only
+    in memory and is never included in errors or logs.
     """
     if token is None:
-        return None
+        return ()
     value = token.strip()
     if not value or "\x00" in value or "/" in value or "\\" in value:
         raise ValueError("Token inválido para resolver un archivo local del Bot API.")
     bot_id = value.split(":", 1)[0]
     if not bot_id.isdigit():
-        raise ValueError("No se pudo identificar el directorio numérico del bot.")
-    return bot_id
+        raise ValueError("No se pudo identificar el directorio del bot.")
+    # Prefer the layout actually observed on the running server (full token),
+    # while retaining compatibility with installations using only numeric IDs.
+    return tuple(dict.fromkeys((value, bot_id)))
 
 
 def _is_within(path: Path, root: Path) -> bool:
@@ -39,17 +42,18 @@ def map_api_file_path(
     *,
     bot_token: str | None = None,
 ) -> Path:
-    """Map local Bot API getFile paths to the shared host volume safely.
+    """Map local Bot API paths to this bot's file in the shared host volume.
 
-    In --local mode the server may return an absolute container path or a
-    relative per-bot path such as ``photos/file_1.jpg``. The target must exist
-    under the configured host root and that bot's numeric-ID folder.
-    Error text never exposes the token or untrusted path.
+    Supports absolute paths rooted in the Bot API container, paths already
+    under the app's shared mount, and relative paths. It accepts both known
+    directory layouts (full bot token or numeric bot ID), validates that the
+    final existing file remains under this bot's directory, and never places
+    the token in logs or error messages.
     """
     if not settings.telegram_api_local_mode:
         raise RuntimeError("El mapeo local requiere TELEGRAM_API_LOCAL_MODE=true.")
 
-    bot_dir = _bot_directory_from_token(bot_token)
+    bot_dirs = _bot_directories_from_token(bot_token)
     server_root = Path(settings.telegram_api_server_files_root).expanduser().resolve()
     host_root = Path(settings.telegram_api_host_files_root).expanduser().resolve()
     raw_text = str(server_file_path).strip()
@@ -61,35 +65,31 @@ def map_api_file_path(
 
     if raw.is_absolute():
         resolved_raw = raw.resolve(strict=False)
-        # Already mapped to the host: accept only the shared root and this bot ID.
+        # The Bot API wrapper may already have mapped the path into the app mount.
         if _is_within(resolved_raw, host_root):
             relative_host = resolved_raw.relative_to(host_root)
-            if bot_dir is None or (relative_host.parts and relative_host.parts[0] == bot_dir):
+            if relative_host.parts and relative_host.parts[0] in bot_dirs:
                 candidates.append(resolved_raw)
 
-        # The official local Bot API stores each bot under its numeric user ID:
-        # <container-root>/<bot_id>/photos/file.jpg (not under the secret token).
+        # Absolute path reported by the local Bot API server.
         if _is_within(resolved_raw, server_root):
             relative_server = resolved_raw.relative_to(server_root)
-            if bot_dir is not None:
-                if relative_server.parts and relative_server.parts[0] == bot_dir:
-                    candidates.append(host_root / relative_server)
-                elif relative_server.parts:
-                    # Some builds return a path relative to the bot's own folder.
-                    candidates.append(host_root / bot_dir / relative_server)
-            elif relative_server.parts and relative_server.parts[0] not in {".", ".."}:
+            if relative_server.parts and relative_server.parts[0] in bot_dirs:
                 candidates.append(host_root / relative_server)
+            elif relative_server.parts:
+                # Some Bot API builds return a path relative to the bot folder.
+                candidates.extend(host_root / bot_dir / relative_server for bot_dir in bot_dirs)
     else:
-        if any(part == ".." for part in raw.parts):
+        if any(part in {"..", "."} for part in raw.parts):
             raise ValueError("La ruta relativa devuelta por Telegram no es segura.")
-        if bot_dir is None:
+        if not bot_dirs:
             raise ValueError("No se puede resolver una ruta relativa sin el token del bot.")
-        if raw.parts and raw.parts[0] == bot_dir:
+        if raw.parts and raw.parts[0] in bot_dirs:
             candidates.append(host_root / raw)
         else:
-            candidates.append(host_root / bot_dir / raw)
+            candidates.extend(host_root / bot_dir / raw for bot_dir in bot_dirs)
 
-    bot_root = (host_root / bot_dir).resolve(strict=False) if bot_dir else None
+    allowed_roots = tuple((host_root / bot_dir).resolve(strict=False) for bot_dir in bot_dirs)
     seen: set[str] = set()
     for candidate in candidates:
         try:
@@ -102,13 +102,13 @@ def map_api_file_path(
         seen.add(key)
         if not _is_within(resolved, host_root) or not resolved.is_file():
             continue
-        if bot_root is not None and not _is_within(resolved, bot_root):
+        if not any(_is_within(resolved, allowed_root) for allowed_root in allowed_roots):
             continue
         return resolved
 
     raise FileNotFoundError(
         "El archivo de Telegram no existe en el volumen compartido del bot. "
-        "Verificá las raíces del Bot API y el montaje Docker."
+        "Verificá las raíces del Bot API, el montaje Docker y el directorio de datos del bot."
     )
 
 

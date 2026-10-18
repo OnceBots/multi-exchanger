@@ -10,6 +10,7 @@ services:
     environment:
       TELEGRAM_API_BASE_URL: http://telegram-bot-api:8081
       TELEGRAM_API_LOCAL_MODE: "true"
+      TELEGRAM_API_SERVER_FILES_ROOT: /var/lib/telegram-bot-api
       TELEGRAM_API_HOST_FILES_ROOT: /srv/tg-bot-api-data
       VIDEO_RAMDISK_PATH: /mnt/ramdisk
       VIDEO_REQUIRE_TMPFS: "true"

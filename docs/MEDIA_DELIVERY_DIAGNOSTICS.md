@@ -9,11 +9,10 @@
 ## Flujo de video rápido con Local Bot API
 
 1. El hijo obtiene `file_path` del Bot API local.
-2. La app valida que el archivo exista bajo el volumen compartido y dentro del subdirectorio del **ID numérico del bot**. El Bot API local organiza sus datos por ID de usuario del bot, no por el token secreto.
-3. Si `file_path` es una ruta absoluta válida dentro de `TELEGRAM_API_SERVER_FILES_ROOT`, se pasa como URI `file://` al propio Bot API local. Así se evita copiar el video completo a `/mnt/ramdisk` y retransmitir todos sus bytes entre los dos contenedores.
-4. La miniatura predeterminada continúa como un `FSInputFile` pequeño en multipart para que Telegram la aplique. No usar `file_id` para la miniatura: Telegram ignora ese valor para thumbnails personalizados.
-5. El Bot API sube el video una sola vez al canal de almacenamiento; los destinatarios reciben copias de ese mensaje con `copy_message`/`copy_messages`.
-6. Si no se valida la ruta local, el pipeline usa un `FSInputFile` seguro como fallback. Si falla el buffer, no se entrega el video sin miniatura.
+2. La app mapea la ruta de `/var/lib/telegram-bot-api` al volumen compartido visto dentro del contenedor como `/srv/tg-bot-api-data`. El mapeo admite las dos estructuras observadas de directorio de bot: token completo o ID numérico; en todos los casos valida que el fichero pertenezca al bot que procesa el mensaje.
+3. El vídeo y la miniatura se suben juntos como `FSInputFile` multipart al canal buffer. El pipeline no usa `file://` para el vídeo, porque la miniatura personalizada debe acompañar una carga multipart del contenido.
+4. El Bot API sube el vídeo una sola vez al canal de almacenamiento; los destinatarios reciben copias de ese mensaje con `copy_message`/`copy_messages`.
+5. Si no se valida la ruta local o falla el buffer, no se entrega el vídeo sin miniatura. No hay fallback al `file_id` original.
 
 ## Requisitos de producción
 

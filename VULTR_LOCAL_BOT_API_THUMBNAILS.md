@@ -5,16 +5,16 @@
 - `TELEGRAM_API_LOCAL_MODE=true`.
 - `CANAL_STORAGE_ID` debe identificar el canal privado de almacenamiento.
 - Cada bot hijo que publica vídeos debe ser administrador del canal y tener permiso para publicar mensajes.
-- `TELEGRAM_API_SERVER_FILES_ROOT` debe coincidir con la raíz que devuelve el Bot API local (por defecto `/var/lib/telegram-bot-api`).
-- `TELEGRAM_API_HOST_FILES_ROOT` debe apuntar al volumen compartido dentro de `app` (en el override de Vultr: `/srv/tg-bot-api-data`).
+- En Vultr, el override fija `TELEGRAM_API_SERVER_FILES_ROOT=/var/lib/telegram-bot-api`, que es el destino observado del montaje del contenedor `tg-local-api`.
+- `TELEGRAM_API_HOST_FILES_ROOT=/srv/tg-bot-api-data` es el mismo volumen visto desde el contenedor `app`; no uses la ruta host `/root/tg-bot-api/data` dentro de la app.
 - `VIDEO_THUMBNAIL_PATH` debe ser un JPEG válido, menor de 200 KB y de hasta 320x320 px.
 
 ## Cómo procesa los vídeos
 
 1. El bot recibe el vídeo y resuelve `getFile` a la ruta que devolvió el Bot API local.
-2. El Bot API local organiza los ficheros bajo un directorio con el **ID numérico del bot**. No se utiliza el token secreto como nombre de carpeta.
-3. La app valida que la ruta y el fichero existan dentro del volumen compartido y estén dentro del directorio del bot correspondiente.
-4. La app resuelve la ruta local del vídeo en el volumen compartido y comprueba tamaño, existencia y directorio numérico del bot.
+2. La ruta real del servidor mostrado en el despliegue tiene la forma `<directorio-de-datos>/<TOKEN_DEL_BOT>/videos/...`. Otras distribuciones pueden usar el ID numérico. El mapeo admite ambos formatos, pero solo dentro del directorio correspondiente al bot que está procesando el mensaje.
+3. La app traduce la ruta absoluta desde `/var/lib/telegram-bot-api` a `/srv/tg-bot-api-data`, comprueba que el fichero exista y verifica que permanezca dentro del directorio del bot.
+4. La app valida el tamaño y existencia del vídeo antes de procesarlo. Los tokens nunca se escriben en los mensajes de error.
 5. El vídeo **y** la miniatura se envían juntos como `FSInputFile` multipart al canal buffer. Telegram documenta que puede ignorar una miniatura personalizada si el vídeo no se carga mediante multipart/form-data; por eso el pipeline final no usa `file://` para el campo `video`. Esto transfiere el contenido por la red privada Docker, pero hace fiable la miniatura personalizada.
 6. El vídeo se almacena una sola vez en el canal buffer. Los miembros reciben una copia de ese mensaje; el código no tiene un fallback que publique el vídeo directo sin miniatura.
 7. Si configuración, ruta, publicación en buffer o entrega fallan, el vídeo se bloquea. Se genera un log explicativo y el emisor recibe un aviso privado si el bot puede contactarlo.

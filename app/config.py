@@ -184,7 +184,7 @@ class Settings:
             telegram_api_local_mode=_bool("TELEGRAM_API_LOCAL_MODE", True),
             telegram_api_timeout_seconds=max(60, _int("TELEGRAM_API_TIMEOUT_SECONDS", 7200)),
             telegram_api_server_files_root=_path("TELEGRAM_API_SERVER_FILES_ROOT", "/var/lib/telegram-bot-api"),
-            telegram_api_host_files_root=_path("TELEGRAM_API_HOST_FILES_ROOT", "/root/tg-bot-api/data"),
+            telegram_api_host_files_root=_path("TELEGRAM_API_HOST_FILES_ROOT", "/srv/tg-bot-api-data"),
             storage_channel_id=storage_channel_id,
             video_ramdisk_path=_path("VIDEO_RAMDISK_PATH", "/mnt/ramdisk"),
             video_require_tmpfs=_bool("VIDEO_REQUIRE_TMPFS", True),

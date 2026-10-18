@@ -1,3 +1,5 @@
+> NOTA: Este manifiesto describe una revisión anterior del mapeo local y queda supersedido en este punto por `PATCH_MANIFEST_LOCAL_API_PATHS_V4.md`, que admite las estructuras observadas con token completo e ID numérico.
+
 # Manifest V4 — corregir entrega de vídeos en salas
 
 ## Causa probable corregida

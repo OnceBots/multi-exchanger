@@ -121,3 +121,27 @@ def test_local_api_wrapper_uses_per_bot_mapping(tmp_path):
     api = build_api_server(settings, token=token)
     assert api.is_local is True
     assert Path(api.wrap_local_file.to_local("photos/file_1.jpg")) == expected
+
+
+def test_absolute_container_path_maps_full_token_directory(tmp_path):
+    server_root = tmp_path / "container" / "var" / "lib" / "telegram-bot-api"
+    host_root = tmp_path / "host" / "tg-bot-api" / "data"
+    token = "123456:TEST_TOKEN"
+    expected = make_file(host_root / token / "videos" / "file_6.mp4", b"video")
+    settings = make_settings(server_root, host_root)
+
+    assert map_api_file_path(
+        settings,
+        server_root / token / "videos" / "file_6.mp4",
+        bot_token=token,
+    ) == expected
+
+
+def test_relative_get_file_path_maps_full_token_directory(tmp_path):
+    server_root = tmp_path / "container" / "var" / "lib" / "telegram-bot-api"
+    host_root = tmp_path / "host" / "tg-bot-api" / "data"
+    token = "123456:TEST_TOKEN"
+    expected = make_file(host_root / token / "videos" / "file_6.mp4", b"video")
+    settings = make_settings(server_root, host_root)
+
+    assert map_api_file_path(settings, "videos/file_6.mp4", bot_token=token) == expected
