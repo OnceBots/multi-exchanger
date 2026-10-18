@@ -6,6 +6,7 @@ from app.services.admin_feed_service import AdminFeedService
 from app.services.broadcast_service import BroadcastService
 from app.services.media_service import MediaService
 from app.services.room_service import RoomService
+from app.services.room_package_service import RoomPackageService
 
 
 def build_child_services(ctx):
@@ -13,5 +14,6 @@ def build_child_services(ctx):
     media = MediaService(ctx, rooms)
     broadcast = BroadcastService(ctx)
     admin_feed = AdminFeedService(ctx)
-    ctx.services = SimpleNamespace(rooms=rooms, media=media, broadcast=broadcast, admin_feed=admin_feed)
+    packages = RoomPackageService(ctx)
+    ctx.services = SimpleNamespace(rooms=rooms, media=media, broadcast=broadcast, admin_feed=admin_feed, packages=packages)
     return ctx.services

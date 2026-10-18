@@ -1,5 +1,15 @@
 # Changelog
 
+## Encrypted room media packages V1
+- La multimedia de las salas se descarga en segundo plano a un volumen Docker persistente, se valida y se registra en MongoDB antes de borrar el mensaje original del miembro.
+- Se crean ZIP con cifrado WinZip AES-256 sin recomprimir los medios; cierre por tamaño de 1800 MiB o 60 segundos de inactividad.
+- Se publica y actualiza un estado por miembro con barra de progreso, botón de actualización y cierre manual exclusivo de `ADMIN_IDS`.
+- Los ZIP se entregan a miembros y administradores desde el canal buffer privado. Los fallos conservan los archivos/estado para reintentar.
+- Se añaden controles de concurrencia, reserva de espacio en disco, recuperación de colas tras reinicio, reconciliación de contadores y entregas por lotes para no saturar el bot.
+- El bot rechaza archivos sin borrar el original si el canal buffer no está configurado.
+- Los errores de descarga/ruta quedan registrados sin ocultarse por errores secundarios del manejador; se mantienen seguros los componentes de las rutas temporales.
+
+
 ## Video cover fix V6
 - Se cambia el envío del diseño de marca desde solo `thumbnail` a `thumbnail` + `cover`. Telegram puede ignorar `thumbnail` y generar un fotograma propio; `cover` es la portada visible de los vídeos.
 - Los vídeos individuales y los vídeos de álbumes se cargan al canal buffer con ambos campos vía multipart y luego las salas/feed de administración copian ese mensaje procesado.

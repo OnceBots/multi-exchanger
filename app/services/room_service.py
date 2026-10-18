@@ -35,7 +35,10 @@ class RoomService:
     async def leave(self, bot_id: int, room_id: str, user_id: int) -> tuple[bool, str]:
         return await self.repositories.room.leave(bot_id, room_id, user_id)
 
-    MEDIA_POLICY_KEYS = ("allow_video", "allow_photo", "allow_files", "allow_animation", "allow_albums")
+    MEDIA_POLICY_KEYS = (
+        "allow_video", "allow_photo", "allow_files", "allow_animation", "allow_albums",
+        "allow_audio", "allow_voice", "allow_video_note", "allow_sticker",
+    )
 
     @staticmethod
     def default_media_policy() -> dict:
@@ -46,6 +49,10 @@ class RoomService:
             "allow_files": False,
             "allow_animation": False,
             "allow_albums": False,
+            "allow_audio": False,
+            "allow_voice": False,
+            "allow_video_note": False,
+            "allow_sticker": False,
         }
 
     @classmethod
@@ -64,7 +71,11 @@ class RoomService:
     def is_media_allowed(cls, room: dict, media_type: str, policy: dict | None = None) -> bool:
         """Apply the bot-admin-controlled policy; legacy room settings never bypass it."""
         policy = cls.normalize_media_policy(policy)
-        key = {"photo": "allow_photo", "video": "allow_video", "document": "allow_files", "animation": "allow_animation"}.get(media_type)
+        key = {
+            "photo": "allow_photo", "video": "allow_video", "document": "allow_files",
+            "animation": "allow_animation", "audio": "allow_audio", "voice": "allow_voice",
+            "video_note": "allow_video_note", "sticker": "allow_sticker",
+        }.get(media_type)
         if key is None or not policy.get(key, False):
             return False
         return True

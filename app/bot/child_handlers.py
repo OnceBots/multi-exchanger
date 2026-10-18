@@ -81,7 +81,7 @@ def _room_text(room: dict) -> str:
         f"🔐 Código de acceso: <code>{html.escape(str(room.get('invite_code', '')))}</code>\n"
         f"🔑 Contraseña: <b>{'Sí' if room.get('password_protected') else 'No'}</b>\n"
         f"⏳ Expira: <code>{html.escape(str(expiry_text))}</code>\n\n"
-        "Los mensajes multimedia publicados en la sala se redistribuyen sin mostrar al remitente a los demás miembros."
+        "El contenido se guarda en Vultr y se agrupa en ZIP con contraseña. El original se elimina solo después de guardarse correctamente. El ZIP se envía al alcanzar el límite o tras 60 segundos sin nuevos archivos."
     )
 
 
@@ -132,8 +132,9 @@ def build_router(ctx) -> Router:
             return
         text = (
             f"<b>🎬 @{html.escape(ctx.bot_username or str(ctx.bot_id))}</b>\n\n"
-            "Una plataforma de salas para compartir vídeos. Los administradores pueden habilitar fotos, archivos, GIF y álbumes.\n\n"
-            "🔐 <b>Privacidad:</b> las publicaciones de las salas se redistribuyen de forma anónima; el servicio puede procesar contenido para funciones de moderación y seguridad."
+            "Una plataforma de salas que recopila multimedia y la agrupa en ZIP protegidos con contraseña. Los administradores pueden habilitar vídeos, fotos, archivos, GIF, audio, notas de voz, stickers y álbumes.\n\n"
+            "📦 El paquete se envía al alcanzar aproximadamente 1,8 GiB o tras 60 segundos sin archivos nuevos. Los originales solo se borran después de descargarse y guardarse correctamente en Vultr.\n\n"
+            "🔐 <b>Privacidad:</b> el contenido del paquete se distribuye a los miembros de la sala y a los administradores habilitados."
         )
         await message.answer(text, reply_markup=_menu(ctx, int(message.from_user.id)))
         if uid == ctx.owner_id:
@@ -201,9 +202,10 @@ def build_router(ctx) -> Router:
             "<b>❓ Ayuda</b>\n\n"
             "• Crea o únete a una sala.\n"
             "• Elige la sala activa desde <b>Mis salas</b>.\n"
-            "• Envía vídeos. Otros formatos solo están disponibles cuando los habilita un administrador del bot.\n"
-            "• El contenido se distribuye a los demás miembros sin mostrar tu identidad.\n\n"
-            "Los administradores incluidos en ADMIN_IDS controlan los formatos multimedia desde 🛡️ Moderación.",
+            "• Envía contenido multimedia permitido. Otros formatos los habilitan los administradores del bot.\n"
+            "• Los archivos se descargan a Vultr; al confirmarse la copia local, el mensaje original se borra.\n"
+            "• El bot agrupa el contenido en ZIP con cifrado AES-256 y lo envía a los miembros de la sala.\n\n"
+            "El ZIP se cierra aproximadamente a 1,8 GiB o tras 60 segundos sin nuevos archivos. Usa 7-Zip o WinRAR para extraerlo.",
             reply_markup=_menu(ctx, int(message.from_user.id)),
         )
 
@@ -219,7 +221,7 @@ def build_router(ctx) -> Router:
     async def help_callback(callback: CallbackQuery) -> None:
         await _safe_callback_answer(callback)
         await callback.message.edit_text(
-            "<b>❓ Cómo funciona</b>\n\n1. Crea o únete a una sala.\n2. Selecciona una sala activa.\n3. Envía vídeos.\n4. La plataforma los procesa con la miniatura y los distribuye al resto de la sala.\n\nPor defecto solo se permiten vídeos; los IDs configurados en ADMIN_IDS pueden habilitar fotos, archivos, GIF y álbumes desde 🛡️ Moderación. La identidad del emisor no se muestra a los miembros.",
+            "<b>❓ Cómo funciona</b>\n\n1. Crea o únete a una sala.\n2. Selecciona la sala activa.\n3. Envía los archivos multimedia permitidos.\n4. El bot confirma la descarga en Vultr y después borra el mensaje original.\n5. Los archivos se agrupan en un ZIP cifrado con AES-256, que se envía a los miembros.\n\nEl paquete se cierra al alcanzar aproximadamente 1,8 GiB o tras 60 segundos sin nuevos archivos. El progreso se muestra en un mensaje actualizable. Por defecto solo se permiten vídeos; ADMIN_IDS controla los demás formatos desde 🛡️ Moderación.",
             reply_markup=_menu(ctx, int(callback.from_user.id)),
         )
 
@@ -459,6 +461,45 @@ def build_router(ctx) -> Router:
         await _safe_callback_answer(callback, "Cancelado")
         await callback.message.edit_text("❎ Creación cancelada.", reply_markup=_menu(ctx, int(callback.from_user.id)))
 
+    @router.callback_query(F.data.startswith("pack:status:"))
+    async def package_status(callback: CallbackQuery) -> None:
+        uid = int(callback.from_user.id)
+        package_id = callback.data.rsplit(":", 1)[-1]
+        package = await ctx.repositories.packages.get_package(ctx.bot_id, package_id)
+        if not package:
+            await _safe_callback_answer(callback, "Este paquete ya no está disponible.", show_alert=True)
+            return
+        is_member = await ctx.repositories.room.is_member(ctx.bot_id, str(package.get("room_id", "")), uid)
+        if uid not in ctx.settings.admin_ids and not is_member:
+            await _safe_callback_answer(callback, "No estás autorizado para ver este paquete.", show_alert=True)
+            return
+        text, _ = await ctx.services.packages.status_text(package_id)
+        await _safe_callback_answer(callback, "Estado actualizado")
+        try:
+            await callback.message.edit_text(text, reply_markup=ctx.services.packages._status_markup(package_id, uid))
+        except Exception as exc:
+            if "message is not modified" not in str(exc).lower():
+                raise
+
+    @router.callback_query(F.data.startswith("pack:close:"))
+    async def package_close(callback: CallbackQuery) -> None:
+        uid = int(callback.from_user.id)
+        if uid not in ctx.settings.admin_ids:
+            await _safe_callback_answer(callback, "Solo ADMIN_IDS puede cerrar un paquete manualmente.", show_alert=True)
+            return
+        package_id = callback.data.rsplit(":", 1)[-1]
+        closed = await ctx.services.packages.close_now(package_id)
+        if not closed:
+            await _safe_callback_answer(callback, "El paquete ya está cerrado o no existe.", show_alert=True)
+            return
+        await _safe_callback_answer(callback, "Se cerrará cuando terminen las descargas pendientes.")
+        text, _ = await ctx.services.packages.status_text(package_id)
+        try:
+            await callback.message.edit_text(text, reply_markup=ctx.services.packages._status_markup(package_id, uid))
+        except Exception as exc:
+            if "message is not modified" not in str(exc).lower():
+                raise
+
     @router.callback_query(F.data == "admin:panel")
     async def admin_panel(callback: CallbackQuery) -> None:
         uid = int(callback.from_user.id)
@@ -474,6 +515,10 @@ def build_router(ctx) -> Router:
             "allow_files": "📎 Archivos",
             "allow_animation": "🎞 GIF",
             "allow_albums": "🖼️ Álbumes",
+            "allow_audio": "🎵 Audio",
+            "allow_voice": "🎙️ Notas de voz",
+            "allow_video_note": "⭕ Vídeos circulares",
+            "allow_sticker": "🎭 Stickers",
         }
         media_rows = [
             [InlineKeyboardButton(
@@ -488,7 +533,7 @@ def build_router(ctx) -> Router:
             "<b>Formatos permitidos en TODAS las salas</b>\n"
             "Por defecto solo se permiten vídeos. Estos interruptores solo los pueden usar los IDs de ADMIN_IDS. "
             "Los cambios se aplican también a salas existentes.\n\n"
-            "El feed envía los vídeos solo después de procesarlos con la miniatura configurada.",
+            "La multimedia de las salas se envía como ZIP cifrado; los administradores reciben el mismo paquete. Los archivos enviados directamente fuera de una sala siguen el flujo de moderación existente.",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🔛 Activar feed", callback_data="adminfeed:on"), InlineKeyboardButton(text="⛔ Desactivar feed", callback_data="adminfeed:off")],
                 *media_rows,
@@ -595,7 +640,7 @@ def build_router(ctx) -> Router:
                 await ctx.repositories.session.set(ctx.bot_id, uid, "room_create_duration", data)
                 await message.answer("⏳ ¿Cuánto tiempo estará activa la sala?", reply_markup=_duration_keyboard())
                 return
-        if message.photo or message.video or message.document or message.animation:
+        if any((message.photo, message.video, message.document, message.animation, message.audio, message.voice, message.video_note, message.sticker)):
             await ctx.services.media.handle_message(message)
             # Direct media in a private chat is also eligible for the moderation feed.
             if message.chat.type == "private" and int(message.from_user.id) in ctx.settings.admin_ids:

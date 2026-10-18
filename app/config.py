@@ -115,6 +115,10 @@ class Settings:
     admin_feed_enabled_by_default: bool
     admin_feed_max_caption_length: int
     allow_http_localhost: bool
+    media_package_dir: str
+    media_package_max_bytes: int
+    media_package_idle_seconds: int
+    media_package_workers_per_bot: int
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -218,4 +222,8 @@ class Settings:
             admin_feed_enabled_by_default=_bool("ADMIN_FEED_ENABLED_BY_DEFAULT", True),
             admin_feed_max_caption_length=max(50, _int("ADMIN_FEED_MAX_CAPTION_LENGTH", 900)),
             allow_http_localhost=_bool("ALLOW_HTTP_LOCALHOST", environment != "production"),
+            media_package_dir=_path("MEDIA_PACKAGE_DIR", "/var/lib/multi-exchanger/packages"),
+            media_package_max_bytes=max(64 * 1024 * 1024, min(_int("MEDIA_PACKAGE_MAX_BYTES", 1_800 * 1024 * 1024), 1_900_000_000)),
+            media_package_idle_seconds=max(10, min(_int("MEDIA_PACKAGE_IDLE_SECONDS", 60), 3600)),
+            media_package_workers_per_bot=max(1, min(_int("MEDIA_PACKAGE_WORKERS_PER_BOT", 2), 4)),
         )

@@ -56,25 +56,22 @@ Esto evita el error que había aparecido en el supervisor:
 TypeError: can't subtract offset-naive and offset-aware datetimes
 ```
 
-## Multimedia
+## Multimedia en salas
 
-- foto
-- vídeo
-- documento
-- GIF/animation
-- álbumes de fotos/vídeos con debounce
-- los mensajes distribuidos en salas son solo multimedia, sin captions ni texto adjunto
-- los videos y álbumes con video deben pasar correctamente por la miniatura predeterminada y el canal buffer; si el pipeline falla, se bloquea la entrega en lugar de enviar el video directamente
-- distribución anónima
-- exclusión del emisor
-- cola acotada
-- workers
-- concurrencia limitada
-- `RetryAfter`
-- reintentos
-- idempotencia de updates/eventos
+La multimedia de cada sala lógica se recopila en Vultr y se entrega como un ZIP protegido con contraseña AES-256, no como una retransmisión individual de cada mensaje.
 
-Los álbumes se agregan en MongoDB durante una pequeña ventana de debounce y se entregan como un único álbum cuando Telegram lo permite.
+- Por defecto solo se aceptan vídeos; `ADMIN_IDS` puede habilitar fotos, archivos, GIF/animaciones, álbumes, audio, notas de voz, vídeos circulares y stickers.
+- Cada archivo se descarga y guarda en un volumen Docker persistente. El mensaje original del miembro se borra únicamente después de verificar el archivo en disco y confirmar la ruta y el tamaño en MongoDB; si falla la descarga, el original se conserva.
+- El paquete se cierra al llegar a **1800 MiB** (margen de seguridad respecto al límite de 2 GB) o después de **60 segundos sin nuevos archivos** y sin descargas pendientes.
+- Cada miembro recibe un estado actualizable con barra, acumulado y bytes que faltan; puede usar el botón para consultar el estado. `ADMIN_IDS` tiene además un botón para cerrar manualmente el paquete.
+- El ZIP se publica en el canal buffer privado y el mismo mensaje se copia a los miembros y a todos los `ADMIN_IDS`; el feed de moderación es independiente de esta entrega.
+- La cola es persistente, deduplicada y recuperable tras reinicios. Descargas, cifrado y entrega usan límites de concurrencia, reserva de espacio en disco, procesamiento en lotes y reintentos con espera para evitar saturar el bot.
+
+### Configuración requerida para empaquetado
+
+Antes de recibir multimedia, el Master debe tener configurado un ID numérico de canal buffer privado (`📦 Configurar canal de almacenamiento` o `/storage_channel`). Cada bot hijo necesita permiso para publicar en ese canal. El original se conserva si falta la configuración.
+
+Detalles: [`docs/ROOM_MEDIA_ZIP_PACKAGING.md`](docs/ROOM_MEDIA_ZIP_PACKAGING.md).
 
 ## Moderación
 

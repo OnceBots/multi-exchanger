@@ -32,12 +32,14 @@ class RepositoryBundle:
         from app.db.repositories.bots import BotRepository
         from app.db.repositories.media import MediaRepository
         from app.db.repositories.rooms import RoomRepository
+        from app.db.repositories.room_packages import RoomPackageRepository
         from app.db.repositories.sessions import SessionRepository
         from app.db.repositories.users import UserRepository
 
         self.bots = BotRepository(mongo)
         self.user = UserRepository(mongo)
         self.room = RoomRepository(mongo)
+        self.packages = RoomPackageRepository(mongo)
         self.media = MediaRepository(mongo)
         self.session = SessionRepository(mongo)
         self.audit = AuditRepository(mongo)
@@ -287,6 +289,9 @@ class BotManager:
                     runtime.add_task(self._broadcast_worker(runtime), f"broadcast:{bot_id}:{index}")
                 runtime.add_task(self._album_worker(runtime), f"album:{bot_id}")
                 runtime.add_task(self._admin_feed_worker(runtime), f"admin-feed:{bot_id}")
+                for package_worker in range(self.settings.media_package_workers_per_bot):
+                    runtime.add_task(runtime.ctx.services.packages.worker_loop(package_worker), f"media-package:{bot_id}:{package_worker}")
+                runtime.add_task(runtime.ctx.services.packages.monitor_loop(), f"media-package-monitor:{bot_id}")
                 runtime.add_task(self._heartbeat_loop(runtime), f"heartbeat:{bot_id}")
                 runtime.add_task(self._replay_pending_updates(bot_id), f"replay:{bot_id}")
                 self.logger.info("child_bot_running bot_id=%s username=@%s", bot_id, me.username)

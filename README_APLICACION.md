@@ -1,21 +1,21 @@
-# Estado de la corrección de rutas del Telegram Bot API local
+# Multi-Exchanger — guía operativa
 
-La corrección está integrada en el código de este proyecto. **No ejecutes el instalador histórico** `apply_local_api_path_fix.py`: quedó deshabilitado porque podía restaurar valores de rutas incompatibles.
+## Paquetes multimedia por sala
 
-Consulta `PATCH_MANIFEST_LOCAL_API_PATHS_V5.md` para la causa verificada, los cambios y las validaciones.
+Las salas agrupan la multimedia permitida por el administrador en paquetes ZIP protegidos con contraseña AES-256. El bot acumula hasta **1800 MiB por paquete** (aprox. 1,89 GB decimales / 1,76 GiB) y lo cierra al alcanzar el límite o tras 60 segundos sin contenido nuevo y sin descargas pendientes.
 
-## Rutas correctas en Vultr
+El progreso se publica en un mensaje actualizable en los chats privados de los miembros. Solo `ADMIN_IDS` puede cerrar el paquete manualmente o modificar la política de multimedia. El ZIP se entrega a todos los miembros de la sala y a los administradores configurados.
 
-El contenedor existente `tg-local-api` monta `/root/tg-bot-api/data` del host en `/var/lib/telegram-bot-api`. El contenedor `app` ve ese mismo volumen en `/srv/tg-bot-api-data`.
+**El mensaje original se borra únicamente después de descargar el archivo a almacenamiento persistente, sincronizarlo a disco y confirmar su ruta/tamaño en MongoDB.** Si falla la descarga, el registro o la verificación, el original se conserva. El ZIP y el trabajo pendiente permanecen en disco/MongoDB si no se completa la entrega.
 
-El archivo `docker-compose.vultr.override.yml` establece explícitamente:
+Consulta [`docs/ROOM_MEDIA_ZIP_PACKAGING.md`](docs/ROOM_MEDIA_ZIP_PACKAGING.md) para configuración del canal buffer, persistencia, límites y operación.
 
-```yaml
-environment:
-  TELEGRAM_API_SERVER_FILES_ROOT: /var/lib/telegram-bot-api
-  TELEGRAM_API_HOST_FILES_ROOT: /srv/tg-bot-api-data
-volumes:
-  - /root/tg-bot-api/data:/srv/tg-bot-api-data:ro
-```
+## Requisito de entrega
 
-No guardes la ruta host `/root/tg-bot-api/data` en `TELEGRAM_API_HOST_FILES_ROOT` dentro del contenedor de aplicación. Conserva `.env`, tokens, MongoDB y el contenedor de Bot API.
+Antes de aceptar multimedia, configurá un canal buffer privado desde el bot Master (`📦 Configurar canal de almacenamiento` o `/storage_channel`) y otorgá permisos de publicación a cada bot hijo. La aplicación rechaza los archivos mientras ese canal no esté configurado para no borrar mensajes que no podría empaquetar y entregar.
+
+## Bot API local en Vultr
+
+El override `docker-compose.vultr.override.yml` configura las raíces del Bot API local. La app necesita lectura del directorio compartido del Bot API y almacenamiento persistente (`package-data`) para los paquetes. El servidor Bot API debe estar realmente iniciado con `--local`; la variable de entorno de la aplicación no activa ese modo en el servicio externo.
+
+No ejecutes el instalador histórico `apply_local_api_path_fix.py`. Conserva `.env`, la base MongoDB y el servicio `tg-local-api` al desplegar.

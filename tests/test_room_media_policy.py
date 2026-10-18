@@ -10,6 +10,10 @@ def test_default_room_media_policy_allows_only_individual_videos():
         "allow_files": False,
         "allow_animation": False,
         "allow_albums": False,
+        "allow_audio": False,
+        "allow_voice": False,
+        "allow_video_note": False,
+        "allow_sticker": False,
     }
     room = {"settings": {"allow_video": True, "allow_photo": True, "allow_files": True, "allow_animation": True, "allow_albums": True}}
     assert RoomService.is_media_allowed(room, "video", policy)
@@ -38,6 +42,10 @@ def test_unknown_and_missing_policy_values_default_to_video_only():
         "allow_files": False,
         "allow_animation": False,
         "allow_albums": False,
+        "allow_audio": False,
+        "allow_voice": False,
+        "allow_video_note": False,
+        "allow_sticker": False,
     }
     assert not RoomService.is_media_allowed({}, "unknown", None)
 

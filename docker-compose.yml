@@ -4,4 +4,9 @@ services:
     env_file: .env
     ports:
       - "127.0.0.1:10000:10000"
+    volumes:
+      - package-data:/var/lib/multi-exchanger/packages
     restart: unless-stopped
+
+volumes:
+  package-data:

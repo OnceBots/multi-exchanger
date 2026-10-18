@@ -3,7 +3,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.bot.api_client import build_api_server, map_api_file_path
+from app.services.local_file_paths import map_api_file_path
+
+try:
+    from app.bot.api_client import build_api_server
+except ModuleNotFoundError as exc:
+    if exc.name != "aiogram":
+        raise
+    build_api_server = None
 
 
 def make_settings(server_root: Path, host_root: Path, *, local=True):
@@ -112,6 +119,8 @@ def test_non_local_mode_cannot_map_local_path(tmp_path):
 
 
 def test_local_api_wrapper_uses_per_bot_mapping(tmp_path):
+    if build_api_server is None:
+        pytest.skip("Aiogram is not installed in the packaging environment")
     server_root = tmp_path / "server"
     host_root = tmp_path / "host"
     token = "123456:TEST_TOKEN"

@@ -17,7 +17,8 @@ COPY scripts ./scripts
 COPY .env.example ./
 
 RUN useradd --create-home --shell /bin/bash appuser \
-    && chown -R appuser:appuser /app
+    && mkdir -p /var/lib/multi-exchanger/packages \
+    && chown -R appuser:appuser /app /var/lib/multi-exchanger
 USER appuser
 
 EXPOSE 10000
