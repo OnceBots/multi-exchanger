@@ -58,14 +58,18 @@ TypeError: can't subtract offset-naive and offset-aware datetimes
 
 ## Multimedia en salas
 
-La multimedia de cada sala lógica se recopila en Vultr y se entrega como un ZIP protegido con contraseña AES-256, no como una retransmisión individual de cada mensaje.
+La multimedia compatible de cada sala lógica se acumula en un ZIP compartido por sala, protegido con contraseña AES-256. El paquete puede contener archivos aportados por diferentes miembros; quienes reciben una copia son los miembros que cumplen la cuota y los administradores.
 
-- Por defecto solo se aceptan vídeos; `ADMIN_IDS` puede habilitar fotos, archivos, GIF/animaciones, álbumes, audio, notas de voz, vídeos circulares y stickers.
+- Por defecto se aceptan vídeos, fotos, archivos, GIF/animaciones, álbumes, audio, notas de voz, vídeos circulares y stickers; `ADMIN_IDS` puede restringir formatos.
 - Cada archivo se descarga y guarda en un volumen Docker persistente. El mensaje original del miembro se borra únicamente después de verificar el archivo en disco y confirmar la ruta y el tamaño en MongoDB; si falla la descarga, el original se conserva.
 - El paquete se cierra al llegar a **1800 MiB** (margen de seguridad respecto al límite de 2 GB) o después de **60 segundos sin nuevos archivos** y sin descargas pendientes.
 - Cada miembro recibe un estado actualizable con barra, acumulado y bytes que faltan; puede usar el botón para consultar el estado. `ADMIN_IDS` tiene además un botón para cerrar manualmente el paquete.
-- El ZIP se publica en el canal buffer privado y el mismo mensaje se copia a los miembros y a todos los `ADMIN_IDS`; el feed de moderación es independiente de esta entrega.
+- El ZIP se publica en el canal buffer privado y el mismo mensaje se copia a los miembros que cumplen la cuota y a los administradores habilitados; el feed de moderación es independiente de esta entrega.
 - La cola es persistente, deduplicada y recuperable tras reinicios. Descargas, cifrado y entrega usan límites de concurrencia, reserva de espacio en disco, procesamiento en lotes y reintentos con espera para evitar saturar el bot.
+
+### Archivos grandes
+
+Para aceptar vídeos de 500 MB–1 GB, el servicio Telegram Bot API debe ejecutarse realmente en modo local. Configura `TELEGRAM_API_ID` y `TELEGRAM_API_HASH` en `.env` y despliega con `docker compose -f docker-compose.yml -f docker-compose.large-files.yml up -d --build`. La API no se publica en Internet y sus archivos se comparten con la app mediante un volumen interno. Consulta [`docs/LARGE_FILES_1GB.md`](docs/LARGE_FILES_1GB.md) antes de migrar una instalación existente.
 
 ### Configuración requerida para empaquetado
 

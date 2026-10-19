@@ -838,13 +838,13 @@ class RoomPackageService:
                 return MediaDownloadError(
                     "Telegram rechazó getFile por tamaño; comprobar que el servidor Bot API se inició realmente con --local.",
                     code="telegram_file_too_large_local_mode_check",
-                    user_message="Telegram rechazó este archivo por su tamaño. El original se conserva. El administrador debe verificar que el Bot API local se ejecute con --local y que el límite de descarga esté configurado correctamente.",
+                    user_message="El servicio de descargas no está habilitado para archivos grandes. El original se conserva; avisá al administrador para que active el modo de archivos grandes. No hace falta reenviarlo hasta que se corrija.",
                     http_status=status,
                 )
             return MediaDownloadError(
                 "Telegram rechazó getFile por el límite de tamaño del Bot API alojado.",
                 code="telegram_file_too_large_cloud_api",
-                user_message="Este archivo supera el límite de descarga del Bot API alojado. El original se conserva; avisá al administrador.",
+                user_message="Este archivo supera el límite de descarga actual. El original se conserva; avisá al administrador para habilitar archivos grandes.",
                 http_status=status,
             )
         if "wrong file identifier" in lower or "file identifier" in lower or "file_id" in lower:
@@ -951,7 +951,7 @@ class RoomPackageService:
         raise MediaDownloadError(
             "Telegram devolvió file_path, pero el archivo no apareció en el volumen compartido tras tres comprobaciones.",
             code="local_bot_api_file_missing",
-            user_message="Telegram identificó el archivo, pero Vultr no encontró su copia en el volumen compartido. El original se conserva y se avisó al administrador; probá reenviarlo si persiste.",
+            user_message="Telegram identificó el archivo, pero no se encontró su copia en el almacenamiento compartido. El original se conserva y se avisó al administrador; probá reenviarlo si persiste.",
         ) from last_error
 
     async def _download_to_local(self, item: dict, destination: Path) -> int:
@@ -1050,7 +1050,7 @@ class RoomPackageService:
             free = shutil.disk_usage(self.base_dir).free
             if free - _GLOBAL_RESERVED_DISK_BYTES < amount + _DISK_FREE_RESERVE_BYTES:
                 raise OSError(
-                    f"Espacio insuficiente en Vultr: quedan {format_bytes(max(0, free - _GLOBAL_RESERVED_DISK_BYTES))}; "
+                    f"Espacio insuficiente en el almacenamiento: quedan {format_bytes(max(0, free - _GLOBAL_RESERVED_DISK_BYTES))}; "
                     f"se requieren {format_bytes(amount + _DISK_FREE_RESERVE_BYTES)} para conservar una reserva de seguridad."
                 )
             _GLOBAL_RESERVED_DISK_BYTES += amount
@@ -1063,7 +1063,7 @@ class RoomPackageService:
         async with _GLOBAL_DISK_RESERVATION_LOCK:
             free = shutil.disk_usage(self.base_dir).free
             if free - _GLOBAL_RESERVED_DISK_BYTES < extra + _DISK_FREE_RESERVE_BYTES:
-                raise OSError("Espacio insuficiente en Vultr para continuar la descarga; el original se conserva.")
+                raise OSError("Espacio insuficiente para continuar la descarga; el original se conserva.")
             _GLOBAL_RESERVED_DISK_BYTES += extra
 
     async def _release_disk_reservation(self, amount: int) -> None:
@@ -1211,14 +1211,14 @@ class RoomPackageService:
         if isinstance(error, MediaDownloadError):
             reason = error.user_message
         elif isinstance(error, OSError) and getattr(error, "errno", None) == 28:
-            reason = "No hay espacio libre suficiente en Vultr. El original se conserva; avisá al administrador."
+            reason = "No hay espacio libre suficiente para guardar el archivo. El original se conserva; avisá al administrador."
         elif isinstance(error, PermissionError):
-            reason = "Vultr no tiene permiso para leer o guardar este archivo. El original se conserva; avisá al administrador."
+            reason = "El servicio no tiene permiso para leer o guardar este archivo. El original se conserva; avisá al administrador."
         elif isinstance(error, FileNotFoundError):
             reason = "No se encontró la copia local del archivo en el Bot API. El original se conserva; probá reenviarlo y avisá al administrador si persiste."
         else:
             reason = "Ocurrió un error al descargar el archivo. El original se conserva; probá reenviarlo. Si vuelve a fallar, avisá al administrador."
-        message = f"❌ No pude descargar y guardar este archivo en Vultr. {reason} No se borró ni añadió al ZIP."
+        message = f"❌ No pude descargar y guardar este archivo en el almacenamiento configurado. {reason} No se borró ni añadió al ZIP."
         try:
             await self._pace_outbound_call()
             await self.ctx.bot.send_message(chat_id=int(item["sender_id"]), text=message)
@@ -1505,7 +1505,7 @@ class RoomPackageService:
             f"📁 En paquete: <b>{count}</b> · descargados: <b>{staged}</b> · pendientes: <b>{pending}</b> · fallidos: <b>{failed}</b> · duplicados: <b>{int(package.get('duplicate_count', 0) or 0)}</b>\n"
             f"{quota_line}"
             f"{close_text}\n\n"
-            "El original se borra solamente después de guardarse en Vultr. Si la descarga falla, se conserva."
+            "El original se borra solamente después de guardarse y verificarse. Si la descarga falla, se conserva."
         )
 
     def _status_markup(self, package_id: str, user_id: int):
@@ -1816,6 +1816,21 @@ class RoomPackageService:
                     self.ctx.bot_id, room_id, utcnow() - _VIDEO_QUOTA_WINDOW
                 )
                 ids = {uid for uid, count in counts.items() if count >= _MIN_VIDEOS_PER_USER_HOUR}
+            # Membership can change while an archive waits for delivery. Apply
+            # the room's current access list at send time instead of granting a
+            # stale eligibility snapshot to someone who has since left/been removed.
+            try:
+                current_members = await self.ctx.repositories.room.members_for_room(self.ctx.bot_id, room_id)
+                current_member_ids = {int(member["user_id"]) for member in current_members}
+                ids.intersection_update(current_member_ids)
+            except Exception:
+                self.logger.exception(
+                    "room_package_membership_revalidation_failed bot_id=%s package_id=%s",
+                    self.ctx.bot_id, package.get("package_id"),
+                )
+                # Fail closed for members if the access check itself failed. Admins
+                # are added separately below so operators can still retrieve the ZIP.
+                ids.clear()
         elif package.get("sender_id") is not None:
             # Compatibility for an archive that started under the former V3 mode.
             ids = {int(package["sender_id"])}

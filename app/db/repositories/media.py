@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import secrets
+from datetime import timedelta
+
 from app.core.datetime import utcnow
+
+_UPDATE_PROCESSING_LEASE = timedelta(minutes=10)
 
 
 class MediaRepository:
@@ -11,27 +16,98 @@ class MediaRepository:
         self.deliveries = mongo.collection("broadcast_deliveries")
         self.updates = mongo.collection("inbound_updates")
 
-    async def register_update(self, bot_id: int, update_id: int, payload: dict) -> bool:
+    async def claim_update(self, bot_id: int, update_id: int, payload: dict) -> str | None:
+        """Atomically claim a Telegram update, rejecting active or completed duplicates.
+
+        A lease makes interrupted PROCESSING records recoverable. The claim token
+        prevents a worker whose lease expired from overwriting a newer worker's
+        result when it eventually finishes.
+        """
+        bot_id = int(bot_id)
+        update_id = int(update_id)
         now = utcnow()
+        token = secrets.token_urlsafe(24)
+        lease_until = now + _UPDATE_PROCESSING_LEASE
+        document = {
+            "bot_id": bot_id,
+            "update_id": update_id,
+            "payload": payload,
+            "status": "PROCESSING",
+            "claim_token": token,
+            "lease_until": lease_until,
+            "created_at": now,
+            "updated_at": now,
+        }
         try:
-            await self.updates.insert_one({"bot_id": bot_id, "update_id": update_id, "payload": payload, "status": "PENDING", "created_at": now, "updated_at": now})
-            return True
+            await self.updates.insert_one(document)
+            return token
         except Exception as exc:
             if exc.__class__.__name__ != "DuplicateKeyError":
                 raise
-            existing = await self.updates.find_one({"bot_id": bot_id, "update_id": update_id})
-            if not existing:
-                return False
-            if existing.get("status") in {"PROCESSED", "PROCESSING"}:
-                return False
-            await self.updates.update_one({"bot_id": bot_id, "update_id": update_id}, {"$set": {"payload": payload, "status": "PENDING", "updated_at": now}})
-            return True
+
+        # Legacy PENDING/FAILED rows and PROCESSING rows with an expired/missing
+        # lease are eligible. This filter + update is atomic across app workers.
+        from pymongo import ReturnDocument
+
+        claimed = await self.updates.find_one_and_update(
+            {
+                "bot_id": bot_id,
+                "update_id": update_id,
+                "$or": [
+                    {"status": {"$in": ["PENDING", "FAILED"]}},
+                    {"status": "PROCESSING", "lease_until": {"$lte": now}},
+                    {"status": "PROCESSING", "lease_until": {"$exists": False}},
+                ],
+            },
+            {
+                "$set": {
+                    "payload": payload,
+                    "status": "PROCESSING",
+                    "claim_token": token,
+                    "lease_until": lease_until,
+                    "updated_at": now,
+                }
+            },
+            return_document=ReturnDocument.AFTER,
+        )
+        if not claimed:
+            return None
+        return str(claimed.get("claim_token") or token)
+
+    async def register_update(self, bot_id: int, update_id: int, payload: dict) -> bool:
+        """Compatibility wrapper retained for callers that only need a yes/no result."""
+        return bool(await self.claim_update(bot_id, update_id, payload))
 
     async def pending_updates(self, bot_id: int, limit: int = 500) -> list[dict]:
-        return await self.updates.find({"bot_id": bot_id, "status": {"$in": ["PENDING", "FAILED"]}}).sort("created_at", 1).limit(limit).to_list(length=limit)
+        now = utcnow()
+        query = {
+            "bot_id": int(bot_id),
+            "$or": [
+                {"status": {"$in": ["PENDING", "FAILED"]}},
+                {"status": "PROCESSING", "lease_until": {"$lte": now}},
+                {"status": "PROCESSING", "lease_until": {"$exists": False}},
+            ],
+        }
+        return await self.updates.find(query).sort("created_at", 1).limit(limit).to_list(length=limit)
 
-    async def mark_update(self, bot_id: int, update_id: int, status: str) -> None:
-        await self.updates.update_one({"bot_id": bot_id, "update_id": update_id}, {"$set": {"status": status, "updated_at": utcnow()}})
+    async def mark_update(
+        self, bot_id: int, update_id: int, status: str, *, claim_token: str | None = None
+    ) -> None:
+        now = utcnow()
+        query = {"bot_id": int(bot_id), "update_id": int(update_id)}
+        if claim_token:
+            query["claim_token"] = str(claim_token)
+        update = {
+            "$set": {
+                "status": str(status),
+                "updated_at": now,
+                "lease_until": None,
+                "claim_token": None,
+            }
+        }
+        if str(status) in {"PROCESSED", "SKIPPED"}:
+            update["$set"]["processed_at"] = now
+        await self.updates.update_one(query, update)
 
     async def create_event(self, event_key: str, bot_id: int, room_id: str, sender_id: int, message_id: int, media_type: str, file_id: str, caption: str | None) -> dict:
         doc = {"event_key": event_key, "bot_id": bot_id, "room_id": room_id, "sender_id": sender_id, "message_id": message_id, "media_type": media_type, "file_id": file_id, "caption": caption, "created_at": utcnow()}

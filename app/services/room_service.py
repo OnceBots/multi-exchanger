@@ -116,17 +116,17 @@ class RoomService:
 
     @staticmethod
     def default_media_policy() -> dict:
-        """Safe bot-wide policy: rooms publish videos only until a bot admin opts in."""
+        """Accept every supported Telegram attachment by default; admins can restrict formats."""
         return {
             "allow_video": True,
-            "allow_photo": False,
-            "allow_files": False,
-            "allow_animation": False,
-            "allow_albums": False,
-            "allow_audio": False,
-            "allow_voice": False,
-            "allow_video_note": False,
-            "allow_sticker": False,
+            "allow_photo": True,
+            "allow_files": True,
+            "allow_animation": True,
+            "allow_albums": True,
+            "allow_audio": True,
+            "allow_voice": True,
+            "allow_video_note": True,
+            "allow_sticker": True,
         }
 
     @classmethod
@@ -157,3 +157,41 @@ class RoomService:
     @staticmethod
     def public_label(room: dict) -> str:
         return "🌎 Pública" if room.get("visibility") == RoomVisibility.PUBLIC.value else "🔒 Privada"
+
+
+async def load_global_media_policy(ctx) -> dict:
+    """Load/migrate the child bot's media policy without resetting deliberate admin choices.
+
+    Version 1's implicit default was video-only. When that exact legacy default is found,
+    upgrade it to the new all-supported-attachments default once. Custom policies remain
+    unchanged, and the version marker prevents re-enabling formats an admin later disables.
+    """
+    doc = await ctx.repositories.bots.get(ctx.bot_id)
+    config = (doc or {}).get("config") or {}
+    raw = config.get("room_media_policy")
+    try:
+        policy_version = int(config.get("room_media_policy_version") or 0)
+    except (TypeError, ValueError):
+        policy_version = 0
+
+    legacy_video_only = {
+        "allow_video": True,
+        "allow_photo": False,
+        "allow_files": False,
+        "allow_animation": False,
+        "allow_albums": False,
+        "allow_audio": False,
+        "allow_voice": False,
+        "allow_video_note": False,
+        "allow_sticker": False,
+    }
+    if policy_version < 2 and (not isinstance(raw, dict) or raw == legacy_video_only):
+        policy = RoomService.default_media_policy()
+        await ctx.repositories.bots.update_config(
+            ctx.bot_id,
+            {"room_media_policy": policy, "room_media_policy_version": 2},
+        )
+        return policy
+    # Existing non-default admin choices are respected, even when they predate
+    # the version marker. Any future toggle writes version 2 explicitly.
+    return RoomService.normalize_media_policy(raw)

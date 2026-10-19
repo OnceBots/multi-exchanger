@@ -13,11 +13,27 @@ class FakeFeed:
 
 
 class FakeMedia:
-    async def register_update(self, bot_id, update_id, payload):
-        return True
+    def __init__(self):
+        self.records = {}
+        self.marked = []
 
-    async def mark_update(self, *args, **kwargs):
-        return None
+    async def claim_update(self, bot_id, update_id, payload):
+        key = (int(bot_id), int(update_id))
+        if key in self.records and self.records[key]["status"] in {"PROCESSING", "PROCESSED", "SKIPPED"}:
+            return None
+        token = f"lease-{bot_id}-{update_id}"
+        self.records[key] = {"status": "PROCESSING", "claim_token": token, "payload": payload}
+        return token
+
+    async def register_update(self, bot_id, update_id, payload):
+        return bool(await self.claim_update(bot_id, update_id, payload))
+
+    async def mark_update(self, bot_id, update_id, status, *, claim_token=None):
+        key = (int(bot_id), int(update_id))
+        record = self.records.get(key)
+        if record and (claim_token is None or record.get("claim_token") == claim_token):
+            record["status"] = status
+        self.marked.append((key, status, claim_token))
 
 
 class FakeRepos:
@@ -114,3 +130,33 @@ def test_webhook_returns_503_while_platform_is_starting():
             json={"update_id": 999},
         )
     assert response.status_code == 503
+
+def test_duplicate_master_webhook_is_not_dispatched_twice():
+    platform = FakePlatform()
+    app = FastAPI()
+    app.include_router(build_webhook_router(platform))
+    body = {"update_id": 321, "message": {"message_id": 4}}
+    with TestClient(app) as client:
+        headers = {"X-Telegram-Bot-Api-Secret-Token": "master-secret"}
+        first = client.post("/telegram/webhook/master", headers=headers, json=body)
+        second = client.post("/telegram/webhook/master", headers=headers, json=body)
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert second.json().get("duplicate") is True
+    assert platform.manager.handle_master_webhook_update.await_count == 1
+
+
+def test_duplicate_child_webhook_is_not_dispatched_twice():
+    platform = FakePlatform()
+    app = FastAPI()
+    app.include_router(build_webhook_router(platform))
+    body = {"update_id": 654, "message": {"message_id": 8}}
+    with TestClient(app) as client:
+        headers = {"X-Telegram-Bot-Api-Secret-Token": "child-secret"}
+        first = client.post("/telegram/webhook/123", headers=headers, json=body)
+        second = client.post("/telegram/webhook/123", headers=headers, json=body)
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert second.json().get("duplicate") is True
+    platform.manager.handle_webhook_update.assert_awaited_once()
+

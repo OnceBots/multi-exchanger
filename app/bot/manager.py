@@ -102,6 +102,7 @@ class BotManager:
         self.system_tasks.create(self._supervisor_loop(), "supervisor")
         self.system_tasks.create(self._room_cleanup_loop(), "room-cleanup")
         self.system_tasks.create(self._bot_lifecycle_loop(), "bot-lifecycle")
+        self.system_tasks.create(self._replay_pending_master_updates(), "master-update-replay")
 
     async def _start_master(self) -> None:
         me = await self.master_bot.get_me()
@@ -351,7 +352,7 @@ class BotManager:
         result = await self.master_dp.feed_raw_update(self.master_bot, payload)
         self.logger.info("master_dispatch_result update_id=%s result_type=%s", update_id, type(result).__name__)
 
-    async def handle_webhook_update(self, bot_id: int, payload: dict) -> None:
+    async def handle_webhook_update(self, bot_id: int, payload: dict, *, claim_token: str | None = None) -> None:
         runtime = self.registry.get(bot_id)
         if runtime is None:
             try:
@@ -369,14 +370,14 @@ class BotManager:
             runtime.last_update_at = utcnow()
             self.logger.info("webhook_dispatch_result bot_id=%s update_id=%s result_type=%s", bot_id, update_id, type(result).__name__)
             if update_id is not None:
-                await self.repositories.media.mark_update(bot_id, int(update_id), "PROCESSED")
+                await self.repositories.media.mark_update(bot_id, int(update_id), "PROCESSED", claim_token=claim_token)
         except TelegramBadRequest as exc:
             # Callback queries expire quickly. This can happen after a Render restart
             # when a persisted callback update is replayed, or after a delayed delivery.
             message = str(exc).lower()
             if "query is too old" in message or "query id is invalid" in message or "response timeout expired" in message:
                 if update_id is not None:
-                    await self.repositories.media.mark_update(bot_id, int(update_id), "SKIPPED")
+                    await self.repositories.media.mark_update(bot_id, int(update_id), "SKIPPED", claim_token=claim_token)
                 runtime.last_update_at = utcnow()
                 self.logger.warning(
                     "stale_callback_ignored bot_id=%s update_id=%s error=%s",
@@ -384,35 +385,88 @@ class BotManager:
                 )
                 return
             if update_id is not None:
-                await self.repositories.media.mark_update(bot_id, int(update_id), "FAILED")
+                await self.repositories.media.mark_update(bot_id, int(update_id), "FAILED", claim_token=claim_token)
             self.logger.exception("webhook_dispatch_failed bot_id=%s update_id=%s", bot_id, update_id)
             raise
         except Exception:
             if update_id is not None:
-                await self.repositories.media.mark_update(bot_id, int(update_id), "FAILED")
+                await self.repositories.media.mark_update(bot_id, int(update_id), "FAILED", claim_token=claim_token)
             self.logger.exception("webhook_dispatch_failed bot_id=%s update_id=%s", bot_id, update_id)
             raise
 
     async def _replay_pending_updates(self, bot_id: int) -> None:
-        pending = await self.repositories.media.pending_updates(bot_id, 200)
-        if not pending:
-            return
-        self.logger.info("replaying_pending_updates bot_id=%s count=%s", bot_id, len(pending))
-        for item in pending:
-            payload = item.get("payload") or {}
-            update_id = item.get("update_id")
-            # CallbackQuery IDs are short-lived and cannot be replayed after a
-            # restart. The user can simply press the button again. Replaying them
-            # only produces QUERY_ID_INVALID / "query is too old" errors.
-            if payload.get("callback_query"):
-                if update_id is not None:
-                    await self.repositories.media.mark_update(bot_id, int(update_id), "SKIPPED")
-                self.logger.info("stale_callback_replay_skipped bot_id=%s update_id=%s", bot_id, update_id)
-                continue
+        """Periodically recover failed or abandoned webhook updates using atomic leases."""
+        runtime = self.registry.get(int(bot_id))
+        while runtime and not runtime.stop_event.is_set():
             try:
-                await self.handle_webhook_update(bot_id, payload)
+                pending = await self.repositories.media.pending_updates(int(bot_id), 200)
+                for item in pending:
+                    payload = item.get("payload") or {}
+                    update_id = item.get("update_id")
+                    if update_id is None:
+                        continue
+                    claim_token = await self.repositories.media.claim_update(int(bot_id), int(update_id), payload)
+                    if not claim_token:
+                        continue
+                    # Telegram callback identifiers expire quickly. Do not retry
+                    # stale callbacks, but still finish the claimed record atomically.
+                    if payload.get("callback_query"):
+                        await self.repositories.media.mark_update(
+                            int(bot_id), int(update_id), "SKIPPED", claim_token=claim_token
+                        )
+                        self.logger.info("stale_callback_replay_skipped bot_id=%s update_id=%s", bot_id, update_id)
+                        continue
+                    try:
+                        await self.handle_webhook_update(int(bot_id), payload, claim_token=claim_token)
+                    except Exception:
+                        self.logger.exception("pending_update_replay_failed bot_id=%s update_id=%s", bot_id, update_id)
+                await asyncio.sleep(15)
+                runtime = self.registry.get(int(bot_id))
+            except asyncio.CancelledError:
+                raise
             except Exception:
-                self.logger.exception("pending_update_replay_failed bot_id=%s update_id=%s", bot_id, update_id)
+                self.logger.exception("pending_update_recovery_failed bot_id=%s", bot_id)
+                await asyncio.sleep(15)
+                runtime = self.registry.get(int(bot_id))
+
+    async def _replay_pending_master_updates(self) -> None:
+        """Recover Master webhook work left pending by a crash or process restart."""
+        while not self.shutting_down:
+            try:
+                pending = await self.repositories.media.pending_updates(0, 200)
+                for item in pending:
+                    payload = item.get("payload") or {}
+                    update_id = item.get("update_id")
+                    if update_id is None:
+                        continue
+                    claim_token = await self.repositories.media.claim_update(0, int(update_id), payload)
+                    if not claim_token:
+                        continue
+                    if payload.get("callback_query"):
+                        await self.repositories.media.mark_update(
+                            0, int(update_id), "SKIPPED", claim_token=claim_token
+                        )
+                        self.logger.info("master_callback_replay_skipped update_id=%s", update_id)
+                        continue
+                    try:
+                        await self.handle_master_webhook_update(payload)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        await self.repositories.media.mark_update(
+                            0, int(update_id), "FAILED", claim_token=claim_token
+                        )
+                        self.logger.exception("master_pending_update_replay_failed update_id=%s", update_id)
+                    else:
+                        await self.repositories.media.mark_update(
+                            0, int(update_id), "PROCESSED", claim_token=claim_token
+                        )
+                await asyncio.sleep(15)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self.logger.exception("master_update_recovery_failed")
+                await asyncio.sleep(15)
 
     async def _broadcast_worker(self, runtime: BotRuntime) -> None:
         assert runtime.broadcast_queue is not None

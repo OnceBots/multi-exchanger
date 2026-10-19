@@ -19,7 +19,7 @@
 1. En el bot Master, `📦 Configurar canal de almacenamiento` (o `/storage_channel`), configurá el ID numérico de un canal privado.
 2. Añadí cada bot hijo a ese canal con permisos para publicar y borrar sus propios mensajes. El canal debe estar restringido a administradores; el mensaje fuente se publica sin protección para que Telegram permita copiarlo, y solo las copias privadas se marcan como protegidas.
 3. La app debe tener el volumen persistente `package-data` montado en `/var/lib/multi-exchanger/packages`.
-4. En Vultr, el Bot API local debe estar realmente iniciado con `--local`, y la app necesita lectura del directorio del Bot API montado en `/srv/tg-bot-api-data`.
+4. El servidor Bot API debe estar realmente iniciado con `--local`; configurar `TELEGRAM_API_LOCAL_MODE=true` en la aplicación no activa ese modo en el servidor. La app necesita acceso de lectura a la raíz de archivos del Bot API montada en `/srv/tg-bot-api-data`. Si todavía no tienes esa instancia configurada, sigue [`LARGE_FILES_1GB.md`](LARGE_FILES_1GB.md).
 
 Si no hay un `storage_channel_id` numérico configurado, el bot rechaza el archivo antes de registrarlo y conserva el mensaje original. No desactives la comprobación para “forzar” el empaquetado.
 

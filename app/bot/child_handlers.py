@@ -10,7 +10,7 @@ from datetime import timedelta
 
 
 from app.core.enums import MemberRole, RoomVisibility
-from app.services.room_service import InsufficientReferralCredits, RoomService
+from app.services.room_service import InsufficientReferralCredits, RoomService, load_global_media_policy
 from app.services.bot_lifecycle import botfather_instructions, schedule_label
 
 
@@ -82,10 +82,8 @@ def _room_keyboard(ctx, room: dict, member: bool, manageable: bool) -> InlineKey
 
 
 async def _current_media_policy(ctx) -> dict:
-    """Load the durable per-child-bot media policy controlled by ADMIN_IDS."""
-    doc = await ctx.repositories.bots.get(ctx.bot_id)
-    config = (doc or {}).get("config") or {}
-    return RoomService.normalize_media_policy(config.get("room_media_policy"))
+    """Load the durable media policy and migrate legacy defaults once."""
+    return await load_global_media_policy(ctx)
 
 def _room_text(room: dict) -> str:
     visibility = "🌎 Pública" if room.get("visibility") == RoomVisibility.PUBLIC.value else "🔒 Privada"
@@ -99,7 +97,7 @@ def _room_text(room: dict) -> str:
         f"🔐 Código de acceso: <code>{html.escape(str(room.get('invite_code', '')))}</code>\n"
         f"🔑 Contraseña: <b>{'Sí' if room.get('password_protected') else 'No'}</b>\n"
         f"⏳ Expira: <code>{html.escape(str(expiry_text))}</code>\n\n"
-        "📦 Cada miembro tiene su propio contador y su ZIP privado. Para habilitar la entrega, ese usuario debe reunir 10 vídeos únicos guardados durante una ventana de 60 minutos. El paquete se cierra al alcanzar 1,8 GiB o tras 60 segundos sin nuevos archivos, cuando ya cumpla el mínimo. El ZIP final queda archivado en el canal configurado y se envía al usuario que aportó el contenido y a los administradores."
+        "📦 La sala acumula archivos únicos aportados por sus miembros en un ZIP compartido y protegido con contraseña. Cada miembro tiene su propio contador: para recibir una copia necesita aportar 10 vídeos únicos guardados durante una ventana móvil de 60 minutos. Los administradores también reciben el paquete. El ZIP se cierra al alcanzar el límite de tamaño o tras 60 segundos sin nuevos archivos, cuando se cumple el mínimo. Ten en cuenta que el ZIP puede incluir contenido de otros miembros de la sala."
     )
 
 
@@ -160,11 +158,11 @@ def build_router(ctx) -> Router:
                     referral_notice = "✅ Tu registro quedó asociado a un enlace de invitación. ¡Gracias por unirte!"
         text = (
             f"<b>🎬 @{html.escape(ctx.bot_username or str(ctx.bot_id))}</b>\n\n"
-            "Una plataforma de salas que recopila multimedia y la agrupa en ZIP protegidos con contraseña. Los administradores pueden habilitar vídeos, fotos, archivos, GIF, audio, notas de voz, stickers y álbumes.\n\n"
+            "Una plataforma de salas que recopila adjuntos multimedia y los agrupa en ZIP compartidos protegidos con contraseña. Los administradores pueden restringir los formatos admitidos.\n\n"
             "🎁 <b>Creación de salas:</b> cada sala cuesta 10 referidos válidos. Comparte tu enlace personal desde <b>🎁 Mis referidos</b>; cuenta un usuario nuevo cuando inicia este bot desde tu enlace. Las cuentas incluidas en ADMIN_IDS no gastan referidos.\n\n"
-            "📦 <b>Paquetes individuales:</b> cada usuario tiene su propio contador y su propio ZIP. Para habilitar la entrega debe reunir 10 vídeos únicos guardados durante una ventana de 60 minutos. El ZIP se cierra al alcanzar 1,8 GiB o tras 60 segundos sin nuevos archivos, siempre que se cumpla el mínimo.\n\n"
-            "🗂️ Cada ZIP final queda archivado en el canal configurado y se envía en privado a quien aportó esos archivos y a los administradores; no se mezcla ni se entrega a los demás miembros.\n\n"
-            "🔐 Los originales solo se borran después de descargarse y guardarse correctamente en Vultr."
+            "📦 <b>ZIP compartidos por sala:</b> se acumulan archivos únicos aportados por todos los miembros. Cada usuario tiene su propio contador y necesita aportar 10 vídeos únicos guardados durante una ventana móvil de 60 minutos para recibir una copia. Los administradores también reciben el ZIP.\n\n"
+            "🗂️ El ZIP puede contener archivos de otros miembros de la misma sala; no envíes contenido que no quieras compartir con los destinatarios del paquete. Se archiva en el canal configurado y se distribuye a los usuarios que cumplen la cuota y a los administradores.\n\n"
+            "🔐 El original solo se borra después de guardarse y verificarse correctamente."
         )
         if referral_notice:
             text = referral_notice + "\n\n" + text
@@ -232,14 +230,12 @@ def build_router(ctx) -> Router:
     async def help_cmd(message: Message) -> None:
         await message.answer(
             "<b>❓ Ayuda</b>\n\n"
-            "• Crea o únete a una sala.\n"
-            "• Elige la sala activa desde <b>Mis salas</b>.\n"
-            "• Envía contenido multimedia permitido. Otros formatos los habilitan los administradores del bot.\n"
-            "• Los archivos se descargan a Vultr; al confirmarse la copia local, el mensaje original se borra.\n"
-            "• Cada usuario tiene un contador independiente: necesita 10 vídeos únicos guardados durante los últimos 60 minutos para habilitar su ZIP.\n"
-            "• El ZIP final se publica en el canal configurado y se copia en privado al usuario que aportó los archivos y a los administradores. Los ZIP personales no se comparten con los demás miembros.\n"
-            "• Los originales solo se borran tras verificarse la copia local en Vultr.\n\n"
-            "El paquete se cierra al alcanzar aproximadamente 1,8 GiB o tras 60 segundos sin nuevos archivos, una vez cumplida la meta. Usa 7-Zip o WinRAR para extraerlo.",
+            "• Crea o únete a una sala y selecciónala como activa.\n"
+            "• Envía vídeos, fotos, documentos, GIF, audio, notas de voz, stickers o álbumes; los administradores pueden desactivar formatos desde 🛡️ Moderación.\n"
+            "• Cada archivo se guarda y verifica antes de borrar el mensaje original. Si el guardado falla, el original se conserva.\n"
+            "• Cada usuario necesita aportar 10 vídeos únicos guardados durante los últimos 60 minutos para recibir una copia del ZIP compartido.\n"
+            "• El ZIP puede incluir contenido de todos los miembros de la sala. Se publica en el canal configurado y se envía a quienes cumplen la cuota y a los administradores.\n\n"
+            "El paquete se cierra al alcanzar el límite seguro de tamaño o tras 60 segundos sin nuevos archivos, una vez cumplida la meta. Usa 7-Zip o WinRAR para extraerlo.",
             reply_markup=_menu(ctx, int(message.from_user.id)),
         )
 
@@ -255,7 +251,13 @@ def build_router(ctx) -> Router:
     async def help_callback(callback: CallbackQuery) -> None:
         await _safe_callback_answer(callback)
         await callback.message.edit_text(
-            "<b>❓ Cómo funciona</b>\n\n1. Crea o únete a una sala.\n2. Selecciona la sala activa.\n3. Envía los archivos multimedia permitidos.\n4. El bot confirma la descarga en Vultr y después borra el mensaje original.\n5. Tu contador personal necesita 10 vídeos únicos guardados en una ventana móvil de 60 minutos. Fotos u otros formatos permitidos pueden acompañar tu ZIP, pero no cuentan como vídeos.\n6. Al cumplir la meta, el ZIP cifrado con AES-256 se publica en el canal configurado y se envía en privado a ti y a los administradores.\n\nEl ZIP se cierra al alcanzar aproximadamente 1,8 GiB o tras 60 segundos sin nuevos archivos, siempre que se haya cumplido la meta. El progreso se muestra en un mensaje actualizable. Por defecto solo se permiten vídeos; ADMIN_IDS controla los demás formatos desde 🛡️ Moderación.",
+            "<b>❓ Cómo funciona</b>\n\n"
+            "1. Crea o únete a una sala y selecciónala como activa.\n"
+            "2. Envía vídeos, fotos, documentos, GIF, audio, notas de voz, stickers o álbumes; los administradores pueden desactivar formatos.\n"
+            "3. Cada archivo se guarda y verifica antes de borrar el mensaje original. Si falla, el original se conserva.\n"
+            "4. La sala acumula el contenido único de todos sus miembros en un ZIP compartido cifrado con AES-256. El ZIP puede incluir archivos de otros miembros de la sala.\n"
+            "5. Para recibir una copia, necesitas aportar 10 vídeos únicos guardados en una ventana móvil de 60 minutos; los administradores también la reciben. Los demás formatos se incluyen en el ZIP, pero no cuentan para la cuota.\n\n"
+            "El ZIP se cierra al alcanzar el límite seguro de tamaño o tras 60 segundos sin nuevos archivos, una vez cumplida la meta. El progreso se muestra en un mensaje actualizable.",
             reply_markup=_menu(ctx, int(callback.from_user.id)),
         )
 
@@ -626,7 +628,7 @@ def build_router(ctx) -> Router:
             "<b>🛡️ Administración del bot</b>\n\n"
             f"Feed de moderación: <b>{status}</b>\n\n"
             "<b>Formatos permitidos en TODAS las salas</b>\n"
-            "Por defecto solo se permiten vídeos. Estos interruptores solo los pueden usar los IDs de ADMIN_IDS. "
+            "Por defecto se aceptan todos los tipos de adjuntos compatibles. Estos interruptores solo los pueden usar los IDs de ADMIN_IDS. "
             "Los cambios se aplican también a salas existentes.\n\n"
             "La multimedia de las salas se envía como ZIP cifrado; los administradores reciben el mismo paquete. Los archivos enviados directamente fuera de una sala siguen el flujo de moderación existente.",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
@@ -650,7 +652,7 @@ def build_router(ctx) -> Router:
         policy[key] = not policy[key]
         # Prevent disabling videos as the sole medium unless admin intentionally
         # disables them; that would leave rooms with no publishable media.
-        await ctx.repositories.bots.update_config(ctx.bot_id, {"room_media_policy": policy})
+        await ctx.repositories.bots.update_config(ctx.bot_id, {"room_media_policy": policy, "room_media_policy_version": 2})
         await ctx.repositories.audit.log(
             ctx.bot_id, uid, "ROOM_MEDIA_POLICY_UPDATED", target=key,
             details={"enabled": policy[key], "policy": policy},

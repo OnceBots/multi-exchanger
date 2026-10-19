@@ -206,6 +206,28 @@ async def test_shared_room_package_delivers_to_eligible_members_and_admins_only(
     assert await service._recipient_ids(package) == [101, 303, 777, 999]
 
 
+@pytest.mark.asyncio
+async def test_shared_room_delivery_rechecks_current_membership(tmp_path):
+    service = build_service(tmp_path)
+
+    class RoomRepo:
+        async def members_for_room(self, bot_id, room_id):
+            # User 303 met the quota before leaving, but no longer has room access.
+            return [{"user_id": 101}, {"user_id": 202}]
+
+    class AdminFeed:
+        async def enabled_admins(self):
+            return []
+
+    service.ctx.repositories.room = RoomRepo()
+    service.ctx.services = SimpleNamespace(admin_feed=AdminFeed())
+    package = {
+        "room_id": "room-1", "package_id": "shared-2", "package_mode": "shared_room",
+        "eligible_user_ids": [101, 303],
+    }
+    assert await service._recipient_ids(package) == [101, 777]
+
+
 def test_shared_room_status_explains_room_wide_contents_and_viewer_quota(tmp_path):
     service = build_service(tmp_path)
     from app.core.datetime import utcnow
@@ -516,7 +538,9 @@ async def test_get_file_size_error_explains_local_api_requirement(tmp_path, monk
 
     assert error.value.code == "telegram_file_too_large_local_mode_check"
     assert "--local" in str(error.value)
-    assert "--local" in error.value.user_message
+    assert "archivos grandes" in error.value.user_message
+    assert "original se conserva" in error.value.user_message
+    assert "Vultr" not in error.value.user_message
 
 
 async def _async_noop(*args, **kwargs):
@@ -592,8 +616,13 @@ async def test_enqueue_accumulates_all_room_members_in_one_shared_package(tmp_pa
 
     accepted_a, item_a, error_a = await service.enqueue(msg(101, 1), "room-1", "video", "file-a", 100, "a.mp4")
     accepted_b, item_b, error_b = await service.enqueue(msg(202, 1), "room-1", "video", "file-b", 200, "b.mp4")
+    # A 1 GiB media file is valid under the default package-size limit.
+    one_gib = 1024 ** 3
+    accepted_large, item_large, error_large = await service.enqueue(
+        msg(303, 1), "room-1", "video", "file-large", one_gib, "large.mp4"
+    )
 
-    assert accepted_a and accepted_b and not error_a and not error_b
+    assert accepted_a and accepted_b and accepted_large and not error_a and not error_b and not error_large
     package_a = fake_repo.packages[fake_repo.items[item_a]["package_id"]]
     package_b = fake_repo.packages[fake_repo.items[item_b]["package_id"]]
     assert package_a["package_id"] == package_b["package_id"]
@@ -601,7 +630,8 @@ async def test_enqueue_accumulates_all_room_members_in_one_shared_package(tmp_pa
     assert "sender_id" not in package_a
     assert fake_repo.items[item_a]["sender_id"] == 101
     assert fake_repo.items[item_b]["sender_id"] == 202
-    assert package_a["item_count"] == 2
+    assert fake_repo.items[item_large]["expected_size"] == 1024 ** 3
+    assert package_a["item_count"] == 3
 
 
 

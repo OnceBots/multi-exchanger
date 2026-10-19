@@ -1,6 +1,7 @@
 # Usar cuando la app Python y el Telegram Bot API local corren en contenedores separados.
 # Conecta el contenedor existente del Bot API a la red externa multiexchanger-botapi
-# con alias DNS: telegram-bot-api.
+# con alias DNS: telegram-bot-api. El servicio Bot API, definido fuera de este
+# Compose, también debe arrancar con TELEGRAM_LOCAL=1; esta opción solo configura la app.
 services:
   app:
     restart: unless-stopped
@@ -10,13 +11,13 @@ services:
     environment:
       TELEGRAM_API_BASE_URL: http://telegram-bot-api:8081
       TELEGRAM_API_LOCAL_MODE: "true"
-      TELEGRAM_API_SERVER_FILES_ROOT: /var/lib/telegram-bot-api
-      TELEGRAM_API_HOST_FILES_ROOT: /srv/tg-bot-api-data
-      VIDEO_RAMDISK_PATH: /mnt/ramdisk
+      TELEGRAM_API_SERVER_FILES_ROOT: "${TELEGRAM_API_SERVER_FILES_ROOT:-/var/lib/telegram-bot-api}"
+      TELEGRAM_API_HOST_FILES_ROOT: "${TELEGRAM_API_HOST_FILES_ROOT:-/srv/tg-bot-api-data}"
+      VIDEO_RAMDISK_PATH: "${VIDEO_RAMDISK_PATH:-/mnt/ramdisk}"
       VIDEO_REQUIRE_TMPFS: "true"
     volumes:
-      - /mnt/ramdisk:/mnt/ramdisk
-      - /root/tg-bot-api/data:/srv/tg-bot-api-data:ro
+      - "${VIDEO_RAMDISK_HOST_PATH:-/mnt/ramdisk}:${VIDEO_RAMDISK_PATH:-/mnt/ramdisk}"
+      - "${TELEGRAM_API_DATA_HOST_PATH:-/root/tg-bot-api/data}:${TELEGRAM_API_HOST_FILES_ROOT:-/srv/tg-bot-api-data}:ro"
 
 networks:
   default: {}

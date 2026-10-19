@@ -20,7 +20,7 @@
 - Cada bot hijo que retransmite videos necesita permiso para publicar en ese canal.
 - `TELEGRAM_API_LOCAL_MODE=true`.
 - `TELEGRAM_API_SERVER_FILES_ROOT` debe coincidir con la ruta absoluta que devuelve `getFile` dentro del contenedor del Bot API local.
-- `TELEGRAM_API_HOST_FILES_ROOT` debe apuntar al mismo volumen montado dentro del contenedor de la app (en el override de Vultr: `/srv/tg-bot-api-data`).
+- `TELEGRAM_API_HOST_FILES_ROOT` debe apuntar al mismo volumen montado dentro del contenedor de la app (en el override de una API local externa: `/srv/tg-bot-api-data`).
 - `VIDEO_THUMBNAIL_PATH` debe ser un JPEG válido, menor de 200 KB y de dimensiones máximas 320x320.
 - El modo rápido no necesita copiar el video a tmpfs. Las variables antiguas `VIDEO_RAMDISK_PATH` y `VIDEO_REQUIRE_TMPFS` se conservan por compatibilidad con `.env`, pero la ruta local optimizada ya no depende del staging temporal.
 
@@ -47,4 +47,4 @@ El repositorio público de Screenshotit describe generación de capturas de vide
 
 ## V5: carpetas del Bot API local tras cambio de token
 
-El resolver de rutas admite directorios con patrón `<ID_NUMERICO>:<token>` siempre que el ID coincida con el bot que recibió el mensaje. No selecciona archivos de otros IDs y rechaza coincidencias relativas ambiguas. Las raíces de Compose siguen siendo `/var/lib/telegram-bot-api` en el contenedor Bot API y `/srv/tg-bot-api-data` en la app.
+El resolver de rutas admite directorios con patrón `<ID_NUMERICO>:<token>` siempre que el ID coincida con el bot que recibió el mensaje. No selecciona archivos de otros IDs y rechaza coincidencias relativas ambiguas. Las raíces predeterminadas son `/var/lib/telegram-bot-api` en el contenedor Bot API y `/srv/tg-bot-api-data` en la app; ambas se pueden ajustar mediante `.env`, manteniendo el mismo volumen compartido.

@@ -39,11 +39,21 @@ def build_webhook_router(platform) -> APIRouter:
         if not platform.ready or not platform.manager:
             logger.warning("master_webhook_not_ready update_id=%s", update_id)
             raise HTTPException(status_code=503, detail="platform_not_ready")
+        claim_token = None
+        if update_id is not None:
+            claim_token = await platform.manager.repositories.media.claim_update(0, int(update_id), data)
+            if not claim_token:
+                logger.info("master_webhook_duplicate update_id=%s", update_id)
+                return JSONResponse({"ok": True, "duplicate": True})
         try:
             await platform.manager.handle_master_webhook_update(data)
         except Exception:
             logger.exception("master_webhook_dispatch_failed update_id=%s", update_id)
+            if update_id is not None:
+                await platform.manager.repositories.media.mark_update(0, int(update_id), "FAILED", claim_token=claim_token)
             raise HTTPException(status_code=500, detail="dispatch_failed")
+        if update_id is not None:
+            await platform.manager.repositories.media.mark_update(0, int(update_id), "PROCESSED", claim_token=claim_token)
         logger.info("master_webhook_processed update_id=%s", update_id)
         return JSONResponse({"ok": True})
 
@@ -67,13 +77,14 @@ def build_webhook_router(platform) -> APIRouter:
         data = await payload(request)
         update_id = data.get("update_id")
         logger.info("child_webhook_received bot_id=%s update_id=%s keys=%s", bot_id, update_id, sorted(data.keys()))
+        claim_token = None
         if update_id is not None:
-            accepted = await platform.manager.repositories.media.register_update(bot_id, int(update_id), data)
-            if not accepted:
+            claim_token = await platform.manager.repositories.media.claim_update(bot_id, int(update_id), data)
+            if not claim_token:
                 logger.info("child_webhook_duplicate bot_id=%s update_id=%s", bot_id, update_id)
                 return {"ok": True, "duplicate": True}
         try:
-            await platform.manager.handle_webhook_update(bot_id, data)
+            await platform.manager.handle_webhook_update(bot_id, data, claim_token=claim_token)
         except Exception:
             logger.exception("child_webhook_dispatch_failed bot_id=%s update_id=%s", bot_id, update_id)
             raise HTTPException(status_code=500, detail="dispatch_failed")

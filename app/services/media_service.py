@@ -12,12 +12,10 @@ class MediaService:
         self.album_tasks: dict[tuple[str, int, str], asyncio.Task] = {}
 
     async def _global_media_policy(self) -> dict:
-        """Read the per-child-bot policy changed only by configured ADMIN_IDS."""
-        from app.services.room_service import RoomService
+        """Load the per-child-bot policy and upgrade the legacy video-only default once."""
+        from app.services.room_service import load_global_media_policy
 
-        doc = await self.ctx.repositories.bots.get(self.ctx.bot_id)
-        config = (doc or {}).get("config") or {}
-        return RoomService.normalize_media_policy(config.get("room_media_policy"))
+        return await load_global_media_policy(self.ctx)
 
     def media_from_message(self, message):
         """Return the media kind and Telegram file_id for supported attachments."""
@@ -69,7 +67,11 @@ class MediaService:
             value = getattr(message, attribute, None)
             if value is not None:
                 return value
-        return message.document if media_type in {"document", "video", "audio"} else None
+        # Files sent "as document" can still be classified as video/audio by MIME
+        # type or extension; use the Document object for the authoritative size/name.
+        if media_type in {"document", "video", "audio"}:
+            return getattr(message, "document", None)
+        return None
 
     async def handle_message(self, message) -> bool:
         if not message.from_user:
@@ -78,12 +80,17 @@ class MediaService:
         session = await self.ctx.repositories.session.get(self.ctx.bot_id, user_id)
         room_id = (session or {}).get("data", {}).get("active_room_id")
         if not room_id:
-            rooms = await self.ctx.repositories.room.list_for_user(self.ctx.bot_id, user_id, 1)
-            room_id = rooms[0]["room_id"] if rooms else None
+            rooms = await self.ctx.repositories.room.list_for_user(self.ctx.bot_id, user_id, 50)
+            usable_rooms = [room for room in rooms if room.get("status") == "ACTIVE"]
+            if len(usable_rooms) == 1:
+                room_id = str(usable_rooms[0]["room_id"])
+            elif len(usable_rooms) > 1:
+                await message.answer("🏠 Perteneces a varias salas. Abre «Mis salas», entra en la sala correcta y pulsa «Publicar multimedia» antes de enviar archivos.")
+                return False
         if not room_id:
             media_type, file_id = self.media_from_message(message)
             if media_type and self.ctx.admin_feed_queue is not None and message.chat.type == "private":
-                media_object = message.video or message.document if media_type == "video" else None
+                media_object = (getattr(message, "video", None) or getattr(message, "document", None)) if media_type in {"video", "audio", "document"} else None
                 await self.ctx.admin_feed_queue.put({
                     "sender_id": user_id, "media_type": media_type, "file_id": file_id,
                     "message_id": int(message.message_id),
